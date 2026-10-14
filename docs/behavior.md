@@ -1,0 +1,58 @@
+# Behavior
+
+## DMs
+The bot answers **every** DM message from an allowed user — no mention needed. Each DM is its own private session.
+
+## Server channels
+By default (`REQUIRE_MENTION=1`) the bot only answers when **@mentioned**. It ignores everything else so it stays out of the way.
+
+Set `REQUIRE_MENTION=0` to have it answer every message in every channel it can see (be careful in busy servers — token costs add up).
+
+## Sessions / memory
+- Each (channel, user) pair has an **isolated conversation**. Alice and Bob in the same channel have separate memories.
+- Conversations are **sessions** in SQLite (`data/sessions.db`), Hermes-style: stable id, title, lineage.
+- **All messages are kept forever**; only the last `MAX_HISTORY_MESSAGES` turns are loaded into the model context per reply.
+- `/new` (or `/reset`) ends the current session and starts a fresh one — the old one stays resumable.
+- `/title <name>` names the current session (used by `/resume`); `/title` shows the current name.
+- **Menus (Hermes-style, adapted for a single-user bot):**
+  - `/resume` with no args → numbered menu of this chat's sessions (named and unnamed) with a one-line preview each.
+  - `/resume <number>` → pick from that menu (1 = most recent); `/resume <name|id>` → direct switch (name = title, or session id).
+    Success replies with `↻ Resumed session **title** (N messages). Conversation restored.`
+  - `/sessions` → this chat's sessions, current one marked `(current)` (Hermes' named-only default is relaxed here — an untitled conversation still shows up).
+  - `/sessions search <q>` → matches titles and message content.
+  - `/sessions <name|id>` → same as `/resume <name|id>`.
+  - Naming a session (`/title <name>`) is still the clean way to make it findable by name.
+
+## Links
+Bare URLs in a message (up to 3) are **auto-fetched** and handed to the model as context, so "what's this about?" + a link works without extra tool calls. The model can also fetch more via `fetch_url` itself.
+
+## Attachments
+| Type | What happens |
+|---|---|
+| Images (png/jpg/webp) | Sent to the model as an image — it can see and describe them |
+| GIFs | Described as animated (first frame visible); the bot can send one back or search for another |
+| Text/code/config files | Contents inlined into the prompt (up to ~15 KB) |
+| PDF / audio / video / other | Described by name + size (no content parsing) |
+| Stickers | Read by name + pack + id — the bot can bounce one back or pick another |
+| > `MAX_ATTACHMENT_BYTES` | Skipped |
+
+Attachment notes include the local file path, so "send that back to me" works via `send_file`.
+
+## Outbound media (model-decided)
+The agent can send things back to you, not just talk:
+- `search_gifs(query)` — GIF search via Giphy (needs `GIPHY_API_KEY`) and/or Klipy (`KLIPY_API_KEY`); `GIF_PROVIDER=auto|giphy|klipy` picks the order (default: Giphy first, Klipy as fallback). Without any key the tool says so and the bot can still send a direct `.gif` URL
+- `send_file(source, caption?)` — sends a file as a Discord attachment; `source` is a URL (auto-downloaded to `downloads/`) or a local path (e.g. a file you sent). GIFs sent this way play as animated GIFs in Discord.
+- `search_stickers(query)` — searches Discord's official sticker packs (14 packs, ~360 stickers, fetched once and cached in `data/sticker_packs.json`) plus this server's stickers
+- `send_sticker(sticker_id, caption?)` — sends a Discord sticker (works in DMs and servers; bots don't need Nitro for stickers)
+- Queued items are sent with the reply: a single uncaptioned item is merged into the reply message, otherwise each item goes out as its own message with its caption.
+
+## Web tools (model-decided)
+- `web_search(query)` — SearXNG, returns 5 results (title + URL + snippet)
+- `fetch_url(url)` — readable text of the page (scripts/styles stripped, ~12 KB cap)
+- The agent loop allows up to **4 tool rounds** per message before it must answer.
+
+## Errors
+Model or search failures produce a short "sorry, something went wrong" reply and log the full traceback. The bot never crashes on one bad message.
+
+## Busy handling
+One message at a time per user/session; extra messages get a "still working" nudge.

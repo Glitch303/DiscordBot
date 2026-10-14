@@ -1,0 +1,12 @@
+#!/usr/bin/env bash
+# discordbot — terminal control for the Discord chat bot
+# Follows symlinks so it works when invoked from ~/.local/bin or anywhere else.
+SOURCE="${BASH_SOURCE[0]}"
+while [ -h "$SOURCE" ]; do
+  DIR="$(cd -P "$(dirname "$SOURCE")" >/dev/null 2>&1 && pwd)"
+  SOURCE="$(readlink "$SOURCE")"
+  [[ "$SOURCE" != /* ]] && SOURCE="$DIR/$SOURCE"
+done
+ROOT="$(cd -P "$(dirname "$SOURCE")/.." && pwd)"
+cd "$ROOT" || exit 1
+exec "$ROOT/.venv/bin/python" -m bot.cli "$@"
