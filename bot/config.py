@@ -1,6 +1,7 @@
 """Configuration loaded from environment / .env file."""
 from __future__ import annotations
 
+import logging
 import os
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -10,12 +11,26 @@ from dotenv import load_dotenv
 ROOT = Path(__file__).resolve().parent.parent
 load_dotenv(ROOT / ".env")
 
+log = logging.getLogger("bot.config")
+
+# Session designs (see bot/store.py): shared = one session per channel,
+# per_user = one isolated session per (channel, user). Each uses its own DB.
+SESSION_MODES = ("shared", "per_user")
+
 
 def _int(name: str, default: int) -> int:
     try:
         return int(os.environ.get(name, "") or default)
     except ValueError:
         return default
+
+
+def _session_mode() -> str:
+    mode = (os.environ.get("SESSION_MODE", "shared") or "shared").strip().lower()
+    if mode not in SESSION_MODES:
+        log.warning("unknown SESSION_MODE %r — falling back to 'shared'", mode)
+        mode = "shared"
+    return mode
 
 
 DEFAULT_PERSONA = """\
@@ -49,6 +64,7 @@ class Config:
     gif_provider: str  # "auto" | "giphy" | "klipy" — order for search_gifs
 
     # Behavior
+    session_mode: str  # "shared" | "per_user" (SESSION_MODE) — see SESSION_MODES
     max_history_messages: int
     max_attachment_bytes: int
     log_level: str
@@ -87,6 +103,7 @@ def load() -> Config:
         giphy_api_key=os.environ.get("GIPHY_API_KEY") or None,
         klipy_api_key=os.environ.get("KLIPY_API_KEY") or None,
         gif_provider=(os.environ.get("GIF_PROVIDER", "auto") or "auto").strip().lower(),
+        session_mode=_session_mode(),
         max_history_messages=_int("MAX_HISTORY_MESSAGES", 30),
         max_attachment_bytes=_int("MAX_ATTACHMENT_BYTES", 25_000_000),
         log_level=os.environ.get("LOG_LEVEL", "INFO").upper(),

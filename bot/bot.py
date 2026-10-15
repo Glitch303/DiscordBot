@@ -28,7 +28,7 @@ class BotClient(discord.Client):
         self.cfg = cfg
         self.model = ModelClient(cfg.model_base_url, cfg.model_name, cfg.model_api_key)
         self.web = Web(cfg.searxng_url)
-        self.store = SessionStore(cfg.data_dir)
+        self.store = SessionStore(cfg.data_dir, mode=cfg.session_mode)
         self._busy: set[str] = set()
         self._owner_name: str | None = None  # cached owner display name (owner facts go into the prompts)
         self.tree = slash.register(self)  # Discord app commands (Hermes-style)
@@ -74,15 +74,18 @@ class BotClient(discord.Client):
         is_dm = isinstance(channel, discord.DMChannel)
         content = message.content or ""
 
-        # Mention gating in server channels. Unmentioned messages are still
-        # recorded into the shared channel session as context, so when we ARE
-        # mentioned we can see the whole conversation, not just the mention.
+        # Mention gating in server channels. In SHARED mode, unmentioned
+        # messages are still recorded into the channel session as context, so
+        # when we ARE mentioned we can see the whole conversation, not just
+        # the mention. In PER-USER mode there is no shared conversation to
+        # follow — unmentioned messages are simply ignored (the classic design).
         if not is_dm and self.cfg.require_mention:
             mentioned = (self.user in message.mentions) or (
                 self.user.id in (m.id for m in message.mentions)
             )
             if not mentioned:
-                self._record_context(message)
+                if self.cfg.session_mode == "shared":
+                    self._record_context(message)
                 return
 
         stripped = content.strip()
@@ -156,10 +159,14 @@ class BotClient(discord.Client):
             # Assemble conversation
             session_id = self.store.ensure_session(chat_key, message.author.id)
             is_channel = not is_dm
+            # Only shared channel sessions need [Name] labels and the stable
+            # group prompt. Per-user channel sessions and DMs get the
+            # per-sender prompt (the sender is implicit — it's 1:1).
+            shared_channel = is_channel and self.cfg.session_mode == "shared"
             history = self.store.history(
-                session_id, self.cfg.max_history_messages, label_senders=is_channel
+                session_id, self.cfg.max_history_messages, label_senders=shared_channel
             )
-            if is_channel:
+            if shared_channel:
                 system = await self._channel_system_prompt()
                 name = message.author.display_name
                 # Label the current turn too. Labels come from the stored sender
@@ -278,7 +285,7 @@ class BotClient(discord.Client):
                 "`/sessions [search <q> | <name>]` — list this chat's conversations\n"
                 "`/resume [number | name]` — menu, or jump back to an old conversation\n"
                 "`/help` — this message\n"
-                "Also in Discord's slash menu (type `/`): `/new` `/title` `/sessions` `/resume` `/delete` with an autocomplete session picker, plus `/status` `/start` `/stop` `/restart` for service control."
+                "Also in Discord's slash menu (type `/`): `/new` `/title` `/sessions` `/resume` `/delete` with an autocomplete session picker, `/session-mode` to switch between shared and per-user session modes, plus `/status` `/start` `/stop` `/restart` for service control."
                 + ("" if is_dm else "\nMention me (@me) to get my attention in this channel.")
             )
 
@@ -480,20 +487,30 @@ class BotClient(discord.Client):
         return base
 
     def _chat_key(self, message: discord.Message) -> str:
-        """Session key: SHARED per server channel (whole-chat context, every user
-        in one session), per-user in DMs. DMs are 1:1, so no labels are needed
-        there — the per-sender prompt still applies."""
+        """Session key, per ``SESSION_MODE``.
+
+        SHARED: one session per server channel (``ch-{channel}``) — whole-chat
+        context, every user in one session, sender labels at read time. DMs are
+        1:1 in both modes (``dm-{user}``).
+
+        PER-USER: isolated ``ch-{channel}-{user}`` sessions — the classic
+        design; each person in a channel has their own conversation.
+        """
         channel = message.channel
         if isinstance(channel, discord.DMChannel):
             return f"dm-{message.author.id}"
-        return f"ch-{channel.id}"
+        if self.cfg.session_mode == "shared":
+            return f"ch-{channel.id}"
+        return f"ch-{channel.id}-{message.author.id}"
 
     def _chat_key_for(self, interaction) -> str:
         """Same keying as ``_chat_key``, for app-command interactions (slash menu)."""
         channel = interaction.channel
         if channel is None or isinstance(channel, discord.DMChannel):
             return f"dm-{interaction.user.id}"
-        return f"ch-{channel.id}"
+        if self.cfg.session_mode == "shared":
+            return f"ch-{channel.id}"
+        return f"ch-{channel.id}-{interaction.user.id}"
 
 
 def _describe_media(it: dict) -> str:

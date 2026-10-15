@@ -7,6 +7,7 @@ Usage:
   discordbot logs [-f] [-n N]    show / follow logs
   discordbot health              model, SearXNG, Discord API checks
   discordbot sessions [status | search <q> | <terms>] [--limit N]
+  discordbot session-mode [shared|per_user]
   discordbot config [KEY] [VALUE]
 """
 from __future__ import annotations
@@ -19,6 +20,9 @@ import subprocess
 import sys
 import time
 from pathlib import Path
+
+from .config import SESSION_MODES
+from .store import db_name_for_mode, db_path_for_mode
 
 ROOT = Path(__file__).resolve().parent.parent
 SERVICE = "discordbot.service"
@@ -210,10 +214,27 @@ def cmd_health(_args: argparse.Namespace) -> int:
 
 # ---- sessions ----------------------------------------------------------------------
 
+def _active_mode() -> str:
+    vals = _load_dotenv()
+    mode = (vals.get("SESSION_MODE", "shared") or "shared").strip().lower()
+    return mode if mode in SESSION_MODES else "shared"
+
+
+def _db_path() -> Path:
+    """The session DB for the ACTIVE mode (each mode has its own file).
+
+    Shared mode falls back to the pre-split sessions.db until the bot renames
+    it on startup (see store.db_path_for_mode).
+    """
+    return db_path_for_mode(ROOT / "data", _active_mode())
+
+
 def _open_db() -> sqlite3.Connection:
-    db = ROOT / "data" / "sessions.db"
+    db = _db_path()
     if not db.exists():
-        print(f"no session database yet: {db}")
+        mode = _active_mode()
+        print(f"no session database for mode '{mode}' yet: {db}")
+        print("start the bot in this mode first — it creates the DB on first use")
         sys.exit(1)
     conn = sqlite3.connect(f"file:{db}?mode=ro", uri=True)
     conn.row_factory = sqlite3.Row
@@ -238,7 +259,9 @@ def cmd_sessions_status() -> int:
         total = conn.execute("SELECT COUNT(*) c FROM sessions").fetchone()["c"]
         named = conn.execute("SELECT COUNT(*) c FROM sessions WHERE title IS NOT NULL").fetchone()["c"]
         msgs = conn.execute("SELECT COUNT(*) c FROM messages").fetchone()["c"]
-        db_size = (ROOT / "data" / "sessions.db").stat().st_size
+        db_path = _db_path()
+        db_size = db_path.stat().st_size
+        print(f"mode: {_active_mode()} (db: data/{db_path.name})")
         print(f"sessions: {total} total ({named} named, {total - named} unnamed) | {msgs} messages | db {db_size // 1024} KB")
         print()
         print("current chat bindings:")
@@ -296,10 +319,54 @@ def cmd_sessions(args: argparse.Namespace) -> int:
         conn.close()
 
 
+# ---- session mode ------------------------------------------------------------------
+
+def cmd_session_mode(args: argparse.Namespace) -> int:
+    """Show the current SESSION_MODE, or switch and restart to apply it.
+
+    Each mode has its own database (see bot/store.py); switching never loses
+    history — it just reads/writes a different DB from the next start.
+    """
+    current = _active_mode()
+    if not args.mode:
+        print(f"session mode: {current} — db: data/{db_name_for_mode(current)}")
+        print(f"switch: discordbot session-mode {'|'.join(SESSION_MODES)} (writes .env + restarts the service)")
+        return 0
+    if args.mode == current:
+        print(f"already in {args.mode} mode")
+        return 0
+    set_env_value("SESSION_MODE", args.mode)
+    print(f"set SESSION_MODE={args.mode} — restarting the service to apply")
+    r = _service("restart")
+    time.sleep(3)
+    return r or cmd_status(None)
+
+
 # ---- config ----------------------------------------------------------------------
 
 def _is_secret(key: str) -> bool:
     return any(t in key.upper() for t in ("TOKEN", "KEY", "SECRET"))
+
+
+def set_env_value(key: str, value: str) -> None:
+    """Write KEY=VALUE into .env (replacing the line if already present).
+
+    Used by `discordbot config` and by the in-Discord /session-mode command.
+    """
+    env_path = ROOT / ".env"
+    text = env_path.read_text() if env_path.exists() else ""
+    lines = text.splitlines()
+    new_line = f"{key}={value}"
+    pat = re.compile(rf"^{re.escape(key)}=.*$")
+    for i, line in enumerate(lines):
+        if pat.match(line.strip()):
+            lines[i] = new_line
+            break
+    else:
+        if lines and lines[-1].strip():
+            lines.append("")
+        lines.append(new_line)
+    env_path.write_text("\n".join(lines) + "\n")
 
 
 def cmd_config(args: argparse.Namespace) -> int:
@@ -324,17 +391,7 @@ def cmd_config(args: argparse.Namespace) -> int:
         return 0
 
     # set
-    new_line = f"{args.key}={args.value}"
-    pat = re.compile(rf"^{re.escape(args.key)}=.*$")
-    for i, line in enumerate(lines):
-        if pat.match(line.strip()):
-            lines[i] = new_line
-            break
-    else:
-        if lines and lines[-1].strip():
-            lines.append("")
-        lines.append(new_line)
-    env_path.write_text("\n".join(lines) + "\n")
+    set_env_value(args.key, args.value)
     print(f"set {args.key} — restart the bot to apply:  discordbot restart")
     return 0
 
@@ -375,6 +432,11 @@ def build_parser() -> argparse.ArgumentParser:
                     help="'status' = overview, 'search <q>' or bare terms = search, nothing = list recent")
     sp.add_argument("--limit", type=int, default=15, help="max rows (default 15)")
     sp.set_defaults(fn=cmd_sessions)
+
+    sp = sub.add_parser("session-mode", help="show or switch session mode (shared | per_user); switching restarts the service")
+    sp.add_argument("mode", nargs="?", choices=SESSION_MODES, default=None,
+                    help="which session design to use (omit to show the current mode)")
+    sp.set_defaults(fn=cmd_session_mode)
 
     sp = sub.add_parser("config", help="show or set .env values")
     sp.add_argument("key", nargs="?", default=None, help="variable name")

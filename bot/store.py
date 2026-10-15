@@ -1,5 +1,19 @@
 """Session store: SQLite-backed sessions + messages (Hermes-style, standalone).
 
+Two session designs (``SESSION_MODE``) are supported, and **each gets its own
+database** so switching never mixes histories:
+
+- ``shared`` → ``sessions_shared.db``: one session per server channel; every
+  message (mentioned or not) is stored with its sender, labelled ``[Name]``
+  at read time.
+- ``per_user`` → ``sessions_per_user.db``: one isolated session per
+  (channel, user); unmentioned messages are ignored; the system prompt
+  adapts to the sender.
+
+``sessions.db`` is the pre-split name (it always held shared-design
+sessions); it is renamed to ``sessions_shared.db`` automatically on first
+start.
+
 Design adapted from Hermes Agent's state layer (hermes_state_*.py), simplified:
 
 - ``sessions`` table: every conversation is a row with a stable id, title,
@@ -29,6 +43,26 @@ import time
 from pathlib import Path
 
 log = logging.getLogger("bot.store")
+
+# One database per session mode (see module docstring).
+SHARED_DB_NAME = "sessions_shared.db"
+PER_USER_DB_NAME = "sessions_per_user.db"
+LEGACY_DB_NAME = "sessions.db"  # pre-split name, always shared-design data
+
+
+def db_name_for_mode(mode: str) -> str:
+    return SHARED_DB_NAME if mode == "shared" else PER_USER_DB_NAME
+
+
+def db_path_for_mode(data_dir: Path, mode: str) -> Path:
+    """The SQLite file a mode uses (shared falls back to the pre-split name)."""
+    path = data_dir / db_name_for_mode(mode)
+    if path.name == SHARED_DB_NAME and not path.exists():
+        legacy = data_dir / LEGACY_DB_NAME
+        if legacy.exists():
+            return legacy
+    return path
+
 
 SCHEMA = """
 CREATE TABLE IF NOT EXISTS sessions (
@@ -123,10 +157,22 @@ def _row_to_api_message(role: str, raw: str) -> dict | None:
 
 
 class SessionStore:
-    def __init__(self, data_dir: Path):
+    """One SQLite ledger for ONE session mode (``shared`` or ``per_user``).
+
+    ``mode`` selects which database file to use (one per mode) and which
+    one-time migrations to run. The pre-split ``sessions.db`` is renamed to
+    ``sessions_shared.db`` on first start so existing shared history is kept.
+    """
+
+    def __init__(self, data_dir: Path, mode: str = "shared", db_name: str | None = None):
         self.dir = data_dir
         self.dir.mkdir(parents=True, exist_ok=True)
-        self.db_path = self.dir / "sessions.db"
+        self.mode = mode
+        if db_name is None:
+            if mode == "shared":
+                self._maybe_rename_legacy_db()
+            db_name = db_name_for_mode(mode)
+        self.db_path = self.dir / db_name
         self._lock = threading.RLock()  # reentrant: public methods may call each other
         self._conn = sqlite3.connect(str(self.db_path), check_same_thread=False)
         self._conn.row_factory = sqlite3.Row
@@ -135,7 +181,31 @@ class SessionStore:
         self._conn.commit()
         self._migrate_schema()
         self.migrate_legacy_json()
-        self.migrate_per_user_sessions()
+        # The per-user → shared merge only makes sense for the shared design:
+        # in per_user mode ``ch-{channel}-{user}`` keys are normal sessions.
+        if mode == "shared":
+            self.migrate_per_user_sessions()
+
+    # ---- one-time rename for the DB split -----------------------------------
+
+    def _maybe_rename_legacy_db(self) -> None:
+        """Rename pre-split ``sessions.db`` → ``sessions_shared.db``.
+
+        The pre-split database always held shared-design sessions, so it
+        belongs to the shared mode. The -wal/-shm sidecars move with it
+        (SQLite pairs them by filename, so all three are renamed together).
+        """
+        legacy = self.dir / LEGACY_DB_NAME
+        target = self.dir / SHARED_DB_NAME
+        if target.exists() or not legacy.exists():
+            return
+        legacy.replace(target)
+        for suffix in ("-wal", "-shm"):
+            side = self.dir / (LEGACY_DB_NAME + suffix)
+            if side.exists():
+                side.replace(self.dir / (SHARED_DB_NAME + suffix))
+        log.info("renamed pre-split %s → %s (one-time, per-mode DB split)",
+                 LEGACY_DB_NAME, SHARED_DB_NAME)
 
     # ---- one-time migration from the old JSON-per-chat layout --------------
 

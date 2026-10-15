@@ -30,7 +30,7 @@ bot/main.py → bot/bot.py  (BotClient)
    ├── mention gating, allowlist, /new /help, typing indicator
    ├── downloads attachments → temp files
    ├── auto-fetches links in messages (httpx + BeautifulSoup)
-   ├── builds OpenAI-format conversation (store.py keeps per-session history; channel sessions are shared, sender names re-applied at read time)
+   ├── builds OpenAI-format conversation (store.py keeps per-session history per mode: shared channel sessions with [Name] sender labels, or isolated per-user sessions)
    ▼
 bot/llm.py  (agent loop, max 4 tool rounds)
    ├── tool: web_search  → bot/web.py → SearXNG @ localhost:8080 (JSON)
@@ -111,6 +111,7 @@ ln -sf "$PWD/bin/discordbot" ~/.local/bin/discordbot
 | `discordbot sessions` | list recent sessions (all chats) |
 | `discordbot sessions status` | session overview: bindings, active/ended state, counts |
 | `discordbot sessions [search <q>]` | search sessions by title or message content |
+| `discordbot session-mode [shared\|per_user]` | show or switch session mode (shared = one session per channel, per_user = one per user); switching writes `.env` + restarts |
 | `discordbot config [KEY] [VALUE]` | list, read, or set `.env` values (tokens masked) |
 
 ## Creating the Discord bot
@@ -142,6 +143,7 @@ ln -sf "$PWD/bin/discordbot" ~/.local/bin/discordbot
 | `GIPHY_API_KEY` | unset | optional; enables `search_gifs` via Giphy. Free key: https://developers.giphy.com/ — the free tier is **~30 requests/min and 50,000 impressions/month** (enough for one bot; the rate limit resets at the top of each hour) |
 | `KLIPY_API_KEY` | unset | optional; alternative GIF provider (https://partner.klipy.com/, free — 100 req/hr in testing mode, unlimited once production is approved). With both keys set the bot falls back to Klipy when Giphy fails |
 | `GIF_PROVIDER` | `auto` | `auto` = Giphy then Klipy; force `giphy` or `klipy` to use only one |
+| `SESSION_MODE` | `shared` | `shared` = one shared session per channel (whole-chat context, `[Name]` labels); `per_user` = one isolated session per user per channel. Each mode has its own database (`data/sessions_shared.db` / `data/sessions_per_user.db`). Switch with `discordbot session-mode <mode>` or `/session-mode` (both restart the bot) |
 
 ## Personality (SOUL.md)
 
@@ -190,6 +192,7 @@ instant guild-scoped copies on startup.
 | `/sessions query:…` | list / search this chat's conversations |
 | `/resume session:…` | resume a conversation — pick from the autocomplete list or type number/title/id; omit for the menu |
 | `/delete session:…` | delete the picked conversation (and all its messages); if it was the current one, a fresh one is started |
+| `/session-mode mode:…` | switch session mode (`shared` vs `per_user`); omit to show current. I restart myself to apply it |
 | `/status` | service state + bot login + model/SearXNG/token health (ephemeral) |
 | `/start` | start the systemd user service |
 | `/stop` | stop the service (the bot goes offline after replying) |
@@ -208,11 +211,18 @@ one pruned transcript per chat:
   stored with their turn and re-injected into the model's context — that's what stops the
   model from "remembering" it sent a GIF it actually never sent (a plain-text
   "there's your gif" used to happen when only the final reply was kept).
-- Sessions are **per-chat**: private per DM user, and **shared per channel** — in a server
-  channel everyone's messages land in one session, each user row stamped with the sender's
-  Discord id + display name (names are re-applied at read time, so stored content stays clean
-  and the model always knows who said what). Old per-user channel sessions are auto-merged
-  into the shared channel session on first start.
+- Sessions are **per-chat**, in one of two designs (`SESSION_MODE`):
+  - `shared` (default): private per DM user, and **shared per channel** — in a server
+    channel everyone's messages land in one session, each user row stamped with the
+    sender's Discord id + display name (names are re-applied at read time, so stored
+    content stays clean and the model always knows who said what). Old per-user channel
+    sessions are auto-merged into the shared channel session on first start.
+  - `per_user`: every (channel, user) pair gets its own isolated session; unmentioned
+    messages are ignored; the system prompt adapts to the sender.
+- **Each mode has its own database** — `data/sessions_shared.db` vs
+  `data/sessions_per_user.db` — so switching never mixes histories (the pre-split
+  `data/sessions.db` is auto-renamed to the shared one on first start). Switch with
+  `discordbot session-mode <mode>` or `/session-mode` in Discord; both restart the bot.
 - `/sessions` only ever lists the current chat's history, same as Hermes' chat-scoped session listing.
 - Existing JSON sessions were auto-migrated to SQLite on first start.
 

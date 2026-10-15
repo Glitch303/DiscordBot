@@ -25,6 +25,10 @@ import subprocess
 import discord
 from discord import app_commands
 
+from .cli import _load_dotenv, set_env_value
+from .config import SESSION_MODES
+from .store import db_name_for_mode
+
 log = logging.getLogger("bot.slash")
 
 SERVICE = "discordbot.service"
@@ -211,6 +215,44 @@ def register(client):
         await interaction.response.send_message(content=_fit(f"🗑️ Deleted **{name}**." + extra), ephemeral=True)
 
     _attach_autocomplete(delete_cmd, "session", _session_autocomplete)
+
+    # ---- session mode --------------------------------------------------------------
+
+    def _current_session_mode() -> str:
+        mode = (_load_dotenv().get("SESSION_MODE", "shared") or "shared").strip().lower()
+        return mode if mode in SESSION_MODES else "shared"
+
+    @tree.command(name="session-mode",
+                  description="Switch session mode: shared (one session per channel) vs per_user (one per user)")
+    @app_commands.describe(mode="Which design to use (omit to show the current mode)")
+    @app_commands.choices(mode=[
+        app_commands.Choice(name="shared — one session per channel (whole-chat context)", value="shared"),
+        app_commands.Choice(name="per_user — one session per user (isolated)", value="per_user"),
+    ])
+    async def session_mode_cmd(interaction: app_commands.Interaction,
+                               mode: str | None = None) -> None:
+        if not client._is_allowed(interaction.user):
+            return await _deny(interaction)
+        current = _current_session_mode()
+        if not mode:
+            return await interaction.response.send_message(
+                content=_fit(
+                    f"Current session mode: **{current}** — db `data/{db_name_for_mode(current)}`\n"
+                    "Each mode has its own database, so switching never loses history.\n"
+                    "Switch with `/session-mode <mode>` (I restart myself to apply it)."
+                ),
+                ephemeral=True,
+            )
+        if mode == current:
+            return await interaction.response.send_message(
+                content=f"Already in **{mode}** mode.", ephemeral=True)
+        await interaction.response.send_message(
+            content=f"🔁 Switching to **{mode}** mode (db `data/{db_name_for_mode(mode)}`) — restarting, be right back.")
+        # Write .env, then restart like /restart: the reply is already on its
+        # way to Discord, so the deferred shutdown lands after it.
+        await asyncio.sleep(1.5)
+        await asyncio.to_thread(set_env_value, "SESSION_MODE", mode)
+        await asyncio.to_thread(_systemctl, "restart")
 
     # ---- service control ----------------------------------------------------------
 
