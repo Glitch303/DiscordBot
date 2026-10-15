@@ -8,8 +8,15 @@ By default (`REQUIRE_MENTION=1`) the bot only answers when **@mentioned**. It ig
 
 Set `REQUIRE_MENTION=0` to have it answer every message in every channel it can see (be careful in busy servers — token costs add up).
 
+**Group chat awareness.** A channel is one shared conversation, not a bag of per-user chats:
+- Every user message in the channel — *mentioned or not* — is recorded in the channel session, so the bot reads the whole chat and can refer to things said minutes or hours ago.
+- In the model prompt each user message is prefixed with the speaker's name (`[Alice]`), and the channel system prompt tells it which face to wear: for the owner (Discord id `OWNER_ID`) the mask is off (the loud brother persona), for everyone else the Proper Lady persona (see `SOUL.md` → "Group chat").
+- Replies are still only triggered by a mention (or always, with `REQUIRE_MENTION=0`), and are addressed to whoever mentioned the bot.
+- `/new` resets the channel for **everyone** (shared session), so use it with that in mind.
+
 ## Sessions / memory
-- Each (channel, user) pair has an **isolated conversation**. Alice and Bob in the same channel have separate memories.
+- **DMs**: each DM user has an **isolated private conversation**.
+- **Server channels**: one **shared session per channel** — Alice and Bob in the same channel share one conversation (see "Group chat awareness" above). Each stored user row carries the sender's Discord id + display name; names are re-applied at read time, so stored content stays clean. (Old per-user channel sessions are automatically merged into the shared channel session on first run — this already happened for the existing history.)
 - Conversations are **sessions** in SQLite (`data/sessions.db`), Hermes-style: stable id, title, lineage.
 - **All messages are kept forever**; only the last `MAX_HISTORY_MESSAGES` turns are loaded into the model context per reply.
 - `/new` (or `/reset`) ends the current session and starts a fresh one — the old one stays resumable.

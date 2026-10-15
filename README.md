@@ -6,7 +6,8 @@ A **standalone** general-chat Discord bot in pure Python. No Hermes Agent, no fr
 
 | Feature | How |
 |---|---|
-| 💬 General chatting | LLM via any OpenAI-compatible endpoint, per-user persistent memory |
+| 💬 General chatting | LLM via any OpenAI-compatible endpoint, persistent memory (private per DM, shared per channel) |
+| 👥 Group chat awareness | In channels the bot reads the **whole** conversation (every user, mentioned or not) and knows who said what; persona switches for the owner vs. everyone else |
 | 🌐 Web search | Self-hosted [SearXNG](https://docs.searxng.org/) — no API key needed |
 | 📄 Web fetch | Fetches any URL and turns it into readable text |
 | 👁️ Sees images | Uploads images → base64 → multimodal model actually looks at them |
@@ -29,7 +30,7 @@ bot/main.py → bot/bot.py  (BotClient)
    ├── mention gating, allowlist, /new /help, typing indicator
    ├── downloads attachments → temp files
    ├── auto-fetches links in messages (httpx + BeautifulSoup)
-   ├── builds OpenAI-format conversation (store.py keeps per-user history)
+   ├── builds OpenAI-format conversation (store.py keeps per-session history; channel sessions are shared, sender names re-applied at read time)
    ▼
 bot/llm.py  (agent loop, max 4 tool rounds)
    ├── tool: web_search  → bot/web.py → SearXNG @ localhost:8080 (JSON)
@@ -129,14 +130,14 @@ ln -sf "$PWD/bin/discordbot" ~/.local/bin/discordbot
 | Var | Default | Notes |
 |---|---|---|
 | `DISCORD_BOT_TOKEN` | — | required |
-| `OWNER_ID` | empty | the user ID treated as the **owner** (bot references them as the main user; everyone else is "other people") |
+| `OWNER_ID` | empty | the user ID treated as the **owner** — in channels the bot wears its private persona (the "brother" face) for them and its public persona for everyone else (see SOUL.md → Group chat) |
 | `DISCORD_ALLOWED_USERS` | empty = allow all | comma-separated user IDs allowed to talk to the bot |
 | `REQUIRE_MENTION` | `1` | `0` = respond to every channel message (no @mention needed) |
 | `MODEL_BASE_URL` | `http://localhost:27906/v1` | any OpenAI-compatible endpoint |
 | `MODEL_NAME` | `Qwen3.8-Orca-27B-Instruct` | must support tool calling + image input |
 | `MODEL_API_KEY` | unset | needed only if the endpoint requires auth |
 | `SEARXNG_URL` | `http://localhost:8080` | SearXNG with `json` format enabled |
-| `MAX_HISTORY_MESSAGES` | `30` | per-user stored history window |
+| `MAX_HISTORY_MESSAGES` | `30` | stored history window per chat (DM or channel session) |
 | `MAX_ATTACHMENT_BYTES` | `25000000` | skip bigger uploads (also caps what the bot downloads/sends) |
 | `GIPHY_API_KEY` | unset | optional; enables `search_gifs` via Giphy. Free key: https://developers.giphy.com/ — the free tier is **~30 requests/min and 50,000 impressions/month** (enough for one bot; the rate limit resets at the top of each hour) |
 | `KLIPY_API_KEY` | unset | optional; alternative GIF provider (https://partner.klipy.com/, free — 100 req/hr in testing mode, unlimited once production is approved). With both keys set the bot falls back to Klipy when Giphy fails |
@@ -207,8 +208,12 @@ one pruned transcript per chat:
   stored with their turn and re-injected into the model's context — that's what stops the
   model from "remembering" it sent a GIF it actually never sent (a plain-text
   "there's your gif" used to happen when only the final reply was kept).
-- Sessions are **per-chat** (per-user in DMs and channels) — `/sessions` only ever lists the
-  current chat's history, same as Hermes' chat-scoped session listing.
+- Sessions are **per-chat**: private per DM user, and **shared per channel** — in a server
+  channel everyone's messages land in one session, each user row stamped with the sender's
+  Discord id + display name (names are re-applied at read time, so stored content stays clean
+  and the model always knows who said what). Old per-user channel sessions are auto-merged
+  into the shared channel session on first start.
+- `/sessions` only ever lists the current chat's history, same as Hermes' chat-scoped session listing.
 - Existing JSON sessions were auto-migrated to SQLite on first start.
 
 ## Requirements

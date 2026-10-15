@@ -10,6 +10,10 @@ Design adapted from Hermes Agent's state layer (hermes_state_*.py), simplified:
   into the model context at read time.
 - ``chat_sessions`` table: binds a chat key to its active session (Hermes
   calls this gateway routing). ``/resume`` simply re-points this binding.
+- Server-channel sessions are SHARED per channel (key ``ch-{channel}``): the
+  whole conversation, from every user, lives in one session. Each user row
+  carries ``user_id`` + ``sender`` so the model knows who said what; history
+  can be read back with ``[Name]`` labels. DMs stay per-user (``dm-{user}``).
 
 This is what powers /new, /title, /sessions, and /resume.
 """
@@ -17,6 +21,7 @@ from __future__ import annotations
 
 import json
 import logging
+import re
 import secrets
 import sqlite3
 import threading
@@ -48,7 +53,9 @@ CREATE TABLE IF NOT EXISTS messages (
     session_id TEXT NOT NULL REFERENCES sessions(id),
     role TEXT NOT NULL,
     content TEXT NOT NULL,
-    timestamp REAL NOT NULL
+    timestamp REAL NOT NULL,
+    user_id INTEGER,
+    sender TEXT
 );
 CREATE INDEX IF NOT EXISTS idx_messages_session ON messages(session_id, id);
 
@@ -126,7 +133,9 @@ class SessionStore:
         self._conn.execute("PRAGMA journal_mode=WAL")
         self._conn.executescript(SCHEMA)
         self._conn.commit()
+        self._migrate_schema()
         self.migrate_legacy_json()
+        self.migrate_per_user_sessions()
 
     # ---- one-time migration from the old JSON-per-chat layout --------------
 
@@ -168,6 +177,137 @@ class SessionStore:
                 )
                 self._conn.commit()
             log.info("migrated legacy session %s (%d messages)", session_key, len(msgs))
+
+    # ---- one-time schema migration (sender columns) -------------------------
+
+    def _migrate_schema(self) -> None:
+        """Add the sender columns to pre-existing databases (new ones get them from SCHEMA)."""
+        cols = {r["name"] for r in self._conn.execute("PRAGMA table_info(messages)")}
+        with self._lock:
+            if "user_id" not in cols:
+                self._conn.execute("ALTER TABLE messages ADD COLUMN user_id INTEGER")
+            if "sender" not in cols:
+                self._conn.execute("ALTER TABLE messages ADD COLUMN sender TEXT")
+            self._conn.commit()
+
+    # ---- one-time merge of legacy per-user channel sessions -----------------
+
+    def migrate_per_user_sessions(self) -> None:
+        """Merge legacy per-user channel sessions into one shared session per channel.
+
+        Old key format was ``ch-{channel}-{user}`` (one isolated session per
+        person). The bot now shares ONE session per channel so it can follow
+        the whole conversation. Every message from a channel's per-user
+        sessions is copied (timestamp order) into ``ch-{channel}``; the legacy
+        sessions are ended (kept for the record). Idempotent: already-migrated
+        sessions are skipped.
+        """
+        pat = re.compile(r"^ch-(\d+)-(\d+)$")
+        with self._lock:
+            sessions = self._conn.execute(
+                "SELECT id, session_key, user_id, end_reason FROM sessions"
+            ).fetchall()
+        groups: dict[str, list] = {}
+        for s in sessions:
+            m = pat.match(s["session_key"])
+            if m and s["end_reason"] != "migrated_to_shared":
+                groups.setdefault(m.group(1), []).append(s)
+        if not groups:
+            return
+        total = 0
+        for chan, rows in groups.items():
+            try:
+                total += self._merge_channel_sessions(rows, f"ch-{chan}")
+            except Exception:
+                log.exception("per-user→shared session merge failed for channel %s", chan)
+        if total:
+            log.info("merged %d legacy messages into shared channel sessions", total)
+
+    def _merge_channel_sessions(self, rows: list, shared_key: str) -> int:
+        with self._lock:
+            existing = self._conn.execute(
+                "SELECT id FROM sessions WHERE session_key = ? LIMIT 1", (shared_key,)
+            ).fetchone()
+            shared_id = existing["id"] if existing else None
+            if shared_id is None:
+                shared_id = _new_id()
+                now = _now()
+                self._conn.execute(
+                    "INSERT INTO sessions (id, session_key, started_at, last_activity_at) "
+                    "VALUES (?,?,?,?)", (shared_id, shared_key, now, now),
+                )
+            msgs: list[tuple] = []
+            for s in rows:
+                for m in self._conn.execute(
+                    "SELECT id, role, content, timestamp FROM messages "
+                    "WHERE session_id = ? ORDER BY id", (s["id"],),
+                ):
+                    uid = s["user_id"] if m["role"] == "user" else None
+                    msgs.append((m["timestamp"], s["id"], m["id"], m["role"], m["content"], uid))
+            moved = 0
+            if msgs:
+                # Interleave all speakers by real time. (ts, legacy_session, row)
+                msgs.sort(key=lambda t: (t[0], t[1], t[2]))
+                for ts, _sid, _mid, role, content, uid in msgs:
+                    self._conn.execute(
+                        "INSERT INTO messages (session_id, role, content, timestamp, user_id) "
+                        "VALUES (?,?,?,?,?)", (shared_id, role, content, ts, uid),
+                    )
+                    moved += 1
+                self._renumber_messages(shared_id)
+                ids = tuple(s["id"] for s in rows)
+                ph = ",".join("?" * len(ids))
+                # Mark EVERY copied legacy session (including ones already ended,
+                # e.g. by /new) so a re-run doesn't merge the same messages again.
+                self._conn.execute(
+                    f"UPDATE sessions SET end_reason = 'migrated_to_shared', "
+                    f"ended_at = COALESCE(ended_at, ?) WHERE id IN ({ph})",
+                    (_now(), *ids),
+                )
+            self._conn.execute(
+                "INSERT OR REPLACE INTO chat_sessions (session_key, session_id) VALUES (?,?)",
+                (shared_key, shared_id),
+            )
+            if moved:
+                first, last, cnt = self._conn.execute(
+                    "SELECT MIN(timestamp), MAX(timestamp), COUNT(*) FROM messages "
+                    "WHERE session_id = ?", (shared_id,),
+                ).fetchone()
+                self._conn.execute(
+                    "UPDATE sessions SET message_count = ?, started_at = ?, last_activity_at = ? "
+                    "WHERE id = ?", (cnt, first or _now(), last or _now(), shared_id),
+                )
+            self._conn.commit()
+            return moved
+
+    def _renumber_messages(self, session_id: str) -> None:
+        """Rewrite a session's message ids in (timestamp, id) order.
+
+        AUTOINCREMENT ids only track insertion order; after merging several
+        sessions, ids must reflect true chronological order because
+        ``history()`` reads by id. Message ids are a GLOBAL primary key, so the
+        new block is placed above the current max id (not at 1..N), and
+        ``sqlite_sequence`` is advanced so the next AUTOINCREMENT doesn't
+        collide. Two passes with a big offset avoid mid-update PK clashes.
+        """
+        rows = self._conn.execute(
+            "SELECT id FROM messages WHERE session_id = ? ORDER BY timestamp, id",
+            (session_id,),
+        ).fetchall()
+        if not rows:
+            return
+        max_id = self._conn.execute("SELECT COALESCE(MAX(id), 0) FROM messages").fetchone()[0]
+        base = max_id
+        OFFSET = 10**12
+        for r in rows:
+            self._conn.execute("UPDATE messages SET id = id + ? WHERE id = ?", (OFFSET, r["id"]))
+        for i, r in enumerate(rows, 1):
+            self._conn.execute(
+                "UPDATE messages SET id = ? WHERE id = ?", (base + i, r["id"] + OFFSET)
+            )
+        self._conn.execute(
+            "UPDATE sqlite_sequence SET seq = ? WHERE name = 'messages'", (base + len(rows),)
+        )
 
     # ---- session lifecycle --------------------------------------------------
 
@@ -255,13 +395,20 @@ class SessionStore:
 
     # ---- messages -----------------------------------------------------------
 
-    def append(self, session_id: str, *messages: tuple[str, object]) -> None:
+    def append(self, session_id: str, *messages: tuple[str, object],
+               user_id: int | None = None, sender: str | None = None) -> None:
+        """Append rows to a session. ``user_id``/``sender`` stamp the USER rows
+        (assistant/tool rows are left unattributed) so shared channel history
+        can say who said what."""
         now = _now()
         with self._lock:
             for role, content in messages:
+                uid = user_id if role == "user" else None
+                name = sender if role == "user" else None
                 self._conn.execute(
-                    "INSERT INTO messages (session_id, role, content, timestamp) VALUES (?,?,?,?)",
-                    (session_id, role, _content_to_json(content), now),
+                    "INSERT INTO messages (session_id, role, content, timestamp, user_id, sender) "
+                    "VALUES (?,?,?,?,?,?)",
+                    (session_id, role, _content_to_json(content), now, uid, name),
                 )
             self._conn.execute(
                 "UPDATE sessions SET message_count = message_count + ?, last_activity_at = ? WHERE id = ?",
@@ -269,17 +416,25 @@ class SessionStore:
             )
             self._conn.commit()
 
-    def history(self, session_id: str, max_messages: int) -> list[dict]:
+    def history(self, session_id: str, max_messages: int,
+                label_senders: bool = False) -> list[dict]:
         """Most recent messages for the model context (oldest first).
 
         The window is measured in user turns, but assistant tool-call rows and
         tool-result rows are kept intact with their turns — the model has to
         see past tool usage or it stops calling tools and starts inventing the
         results in plain text (see the "hallucinated GIF send" bug).
+
+        ``label_senders`` (shared channel sessions): prefix each user message
+        with ``[Sender]`` so the model can tell who said what. The label is a
+        view-time concern — stored content stays clean, and legacy rows without
+        a stored name fall back to ``[id:<discord id>]`` (the owner id is in
+        the system prompt, so the model can still match it).
         """
         with self._lock:
             rows = self._conn.execute(
-                "SELECT role, content FROM messages WHERE session_id = ? ORDER BY id DESC LIMIT ?",
+                "SELECT role, content, user_id, sender FROM messages "
+                "WHERE session_id = ? ORDER BY id DESC LIMIT ?",
                 # A turn can be up to ~11 rows (user + 4 tool rounds + final
                 # assistant); fetch generously and cut by user turns instead.
                 (session_id, max_messages * 16),
@@ -296,6 +451,8 @@ class SessionStore:
         for r in reversed(kept):
             m = _row_to_api_message(r["role"], r["content"])
             if m is not None:
+                if label_senders and m["role"] == "user":
+                    m = _label_user_message(m, r["sender"], r["user_id"])
                 out.append(m)
         # Don't start on an assistant/tool message (would confuse the API)
         while out and out[0]["role"] != "user":
@@ -456,6 +613,23 @@ class SessionStore:
     def close(self) -> None:
         with self._lock:
             self._conn.close()
+
+
+def _label_user_message(m: dict, sender: str | None, user_id: int | None) -> dict:
+    """Prefix a user message with its speaker: ``[Name] ...`` (view-time only)."""
+    name = sender or (f"id:{user_id}" if user_id else None)
+    if not name:
+        return m
+    prefix = f"[{name}] "
+    content = m.get("content")
+    if isinstance(content, str):
+        m["content"] = prefix + content
+    elif isinstance(content, list):
+        for part in content:
+            if isinstance(part, dict) and part.get("type") == "text" and isinstance(part.get("text"), str):
+                part["text"] = prefix + part["text"]
+                break
+    return m
 
 
 def _preview_text(raw: str) -> str:

@@ -30,6 +30,7 @@ class BotClient(discord.Client):
         self.web = Web(cfg.searxng_url)
         self.store = SessionStore(cfg.data_dir)
         self._busy: set[str] = set()
+        self._owner_name: str | None = None  # cached for the group-chat prompt
         self.tree = slash.register(self)  # Discord app commands (Hermes-style)
 
     # ---- lifecycle -------------------------------------------------------
@@ -73,12 +74,15 @@ class BotClient(discord.Client):
         is_dm = isinstance(channel, discord.DMChannel)
         content = message.content or ""
 
-        # Mention gating in server channels
+        # Mention gating in server channels. Unmentioned messages are still
+        # recorded into the shared channel session as context, so when we ARE
+        # mentioned we can see the whole conversation, not just the mention.
         if not is_dm and self.cfg.require_mention:
             mentioned = (self.user in message.mentions) or (
                 self.user.id in (m.id for m in message.mentions)
             )
             if not mentioned:
+                self._record_context(message)
                 return
 
         stripped = content.strip()
@@ -89,7 +93,7 @@ class BotClient(discord.Client):
 
         chat_key = self._chat_key(message)
         if chat_key in self._busy:
-            await message.reply("⏳ Still working on your last message — one at a time please.")
+            await message.reply("⏳ Still working on the last message here — one at a time, please.")
             return
         self._busy.add(chat_key)
 
@@ -151,10 +155,31 @@ class BotClient(discord.Client):
 
             # Assemble conversation
             session_id = self.store.ensure_session(chat_key, message.author.id)
-            history = self.store.history(session_id, self.cfg.max_history_messages)
-            convo: list[dict] = [{"role": "system", "content": self._system_prompt_for(message.author.id)}]
+            is_channel = not is_dm
+            history = self.store.history(
+                session_id, self.cfg.max_history_messages, label_senders=is_channel
+            )
+            if is_channel:
+                system = await self._channel_system_prompt()
+                name = message.author.display_name
+                # Label the current turn too. Labels come from the stored sender
+                # at read time, so the PERSISTED parts stay unlabelled (copy).
+                user_content = [dict(p) for p in parts]
+                if user_content and user_content[0].get("type") == "text":
+                    user_content[0]["text"] = f"[{name}] " + user_content[0]["text"]
+                if self.cfg.owner_id:
+                    if message.author.id == self.cfg.owner_id:
+                        user_content.append({"type": "text", "text":
+                            f"(You are replying to {name} — your brother, the owner. Mask off.)"})
+                    else:
+                        user_content.append({"type": "text", "text":
+                            f"(You are replying to {name} — not your brother. Wear the public face.)"})
+            else:
+                system = self._system_prompt_for(message.author.id)
+                user_content = parts
+            convo: list[dict] = [{"role": "system", "content": system}]
             convo.extend(history)
-            convo.append({"role": "user", "content": parts})
+            convo.append({"role": "user", "content": user_content})
 
             async with channel.typing():
                 new_msgs = await _to_thread(run_agent, self.model, self.web, convo, media_ctx)
@@ -359,6 +384,86 @@ class BotClient(discord.Client):
         ]
         return "\n".join(lines)
 
+    # ---- whole-chat context --------------------------------------------------
+
+    def _record_context(self, message: discord.Message) -> None:
+        """Record an unmentioned message in the shared channel session.
+
+        The bot only *speaks* on mention, but it should *know* what happened in
+        the channel in between — these labelled rows are context for the next
+        real turn (no model call here, so it's cheap).
+        """
+        stripped = (message.content or "").strip()
+        if not stripped:
+            n = len(message.attachments) + len(message.stickers)
+            if not n:
+                return
+            stripped = f"(sent {n} attachment{'s' if n > 1 else ''})"
+        chat_key = self._chat_key(message)
+        try:
+            session_id = self.store.ensure_session(chat_key, message.author.id)
+            self.store.append(
+                session_id,
+                ("user", stripped),
+                user_id=message.author.id,
+                sender=message.author.display_name,
+            )
+        except Exception:
+            log.exception("failed to record context message %s", message.id)
+
+    # ---- system prompts --------------------------------------------------------
+
+    async def _owner_display_name(self) -> str | None:
+        """Cached owner display name (used to name the brother in the group prompt)."""
+        if not self.cfg.owner_id:
+            return None
+        if self._owner_name:
+            return self._owner_name
+        try:
+            user = await self.fetch_user(self.cfg.owner_id)
+        except Exception:
+            log.warning("could not fetch owner user %s", self.cfg.owner_id)
+            return None
+        self._owner_name = user.display_name
+        return self._owner_name
+
+    async def _channel_system_prompt(self) -> str:
+        """Stable system prompt for SHARED channel sessions.
+
+        Unlike DMs (where the prompt depends on who is talking), a channel has
+        many speakers, so the prompt is identical for every turn: it explains
+        the [Name] labels and BOTH faces, and the per-turn note on the current
+        message says which one to wear right now.
+        """
+        base = self.cfg.system_prompt
+        group = (
+            "\n\n## Group chat\n"
+            "You are in a Discord server channel shared by several people. You see the "
+            "whole conversation, not just the messages that mention you: every user "
+            "message is prefixed with the speaker's name in square brackets, e.g. "
+            "[Alice]: what do you mean?\n"
+            "Keep track of who said what and who is talking to whom. When you reply, act "
+            "like you have been reading the channel — never act surprised by something "
+            "someone said earlier in it. You only speak when you are @mentioned; your "
+            "reply is for the person who mentioned you. Address people by name when it "
+            "clarifies who you mean."
+        )
+        if not self.cfg.owner_id:
+            return base + group
+        owner_name = await self._owner_display_name()
+        owner = (f"{owner_name} (Discord id {self.cfg.owner_id})"
+                 if owner_name else f"the user with Discord id {self.cfg.owner_id}")
+        who = owner_name or "He"
+        return base + group + (
+            f"\n\nYour brother (your owner) is {owner}.\n"
+            f"- When {who} speaks to you, the mask is OFF: loud, bratty, candid, "
+            "melodramatic, the rotating brother-names. Let it all out.\n"
+            "- When anyone else speaks to you, wear the PUBLIC face: the Proper Lady. "
+            "Elegant, polite, formal, a little aloof. Short clean sentences, no volume, "
+            "no bratting out, no brother-names (they're not your onii-chan). You can "
+            "still be a little sharp and well-timed — restraint, not noise. Never actually rude."
+        )
+
     def _system_prompt_for(self, user_id: int) -> str:
         base = self.cfg.system_prompt
         if self.cfg.owner_id and user_id == self.cfg.owner_id:
@@ -368,18 +473,20 @@ class BotClient(discord.Client):
         return base
 
     def _chat_key(self, message: discord.Message) -> str:
-        """Session key: per-user in DMs and server channels (isolated contexts)."""
+        """Session key: SHARED per server channel (whole-chat context, every user
+        in one session), per-user in DMs. DMs are 1:1, so no labels are needed
+        there — the per-sender prompt still applies."""
         channel = message.channel
         if isinstance(channel, discord.DMChannel):
             return f"dm-{message.author.id}"
-        return f"ch-{channel.id}-{message.author.id}"
+        return f"ch-{channel.id}"
 
     def _chat_key_for(self, interaction) -> str:
         """Same keying as ``_chat_key``, for app-command interactions (slash menu)."""
         channel = interaction.channel
         if channel is None or isinstance(channel, discord.DMChannel):
             return f"dm-{interaction.user.id}"
-        return f"ch-{channel.id}-{interaction.user.id}"
+        return f"ch-{channel.id}"
 
 
 def _describe_media(it: dict) -> str:
