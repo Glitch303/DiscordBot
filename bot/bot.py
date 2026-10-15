@@ -30,7 +30,7 @@ class BotClient(discord.Client):
         self.web = Web(cfg.searxng_url)
         self.store = SessionStore(cfg.data_dir)
         self._busy: set[str] = set()
-        self._owner_name: str | None = None  # cached for the group-chat prompt
+        self._owner_name: str | None = None  # cached owner display name (owner facts go into the prompts)
         self.tree = slash.register(self)  # Discord app commands (Hermes-style)
 
     # ---- lifecycle -------------------------------------------------------
@@ -170,10 +170,10 @@ class BotClient(discord.Client):
                 if self.cfg.owner_id:
                     if message.author.id == self.cfg.owner_id:
                         user_content.append({"type": "text", "text":
-                            f"(You are replying to {name} — your brother, the owner. Mask off.)"})
+                            f"(You are replying to {name} — your owner. Private face.)"})
                     else:
                         user_content.append({"type": "text", "text":
-                            f"(You are replying to {name} — not your brother. Wear the public face.)"})
+                            f"(You are replying to {name} — not your owner. Public face.)"})
             else:
                 system = self._system_prompt_for(message.author.id)
                 user_content = parts
@@ -414,7 +414,7 @@ class BotClient(discord.Client):
     # ---- system prompts --------------------------------------------------------
 
     async def _owner_display_name(self) -> str | None:
-        """Cached owner display name (used to name the brother in the group prompt)."""
+        """Cached owner display name (the owner's identity is injected into the prompts)."""
         if not self.cfg.owner_id:
             return None
         if self._owner_name:
@@ -432,8 +432,10 @@ class BotClient(discord.Client):
 
         Unlike DMs (where the prompt depends on who is talking), a channel has
         many speakers, so the prompt is identical for every turn: it explains
-        the [Name] labels and BOTH faces, and the per-turn note on the current
-        message says which one to wear right now.
+        the [Name] labels and states who the owner is. Facts only — which face
+        the owner gets and which face everyone else gets is defined in the
+        persona (SOUL.md); the per-turn note on the current message says who
+        it's from.
         """
         base = self.cfg.system_prompt
         group = (
@@ -453,23 +455,28 @@ class BotClient(discord.Client):
         owner_name = await self._owner_display_name()
         owner = (f"{owner_name} (Discord id {self.cfg.owner_id})"
                  if owner_name else f"the user with Discord id {self.cfg.owner_id}")
-        who = owner_name or "He"
         return base + group + (
-            f"\n\nYour brother (your owner) is {owner}.\n"
-            f"- When {who} speaks to you, the mask is OFF: loud, bratty, candid, "
-            "melodramatic, the rotating brother-names. Let it all out.\n"
-            "- When anyone else speaks to you, wear the PUBLIC face: the Proper Lady. "
-            "Elegant, polite, formal, a little aloof. Short clean sentences, no volume, "
-            "no bratting out, no brother-names (they're not your onii-chan). You can "
-            "still be a little sharp and well-timed — restraint, not noise. Never actually rude."
+            f"\n\n## Owner\n"
+            f"Your owner is {owner}.\n"
+            "Wear your private face for them and your public face for everyone "
+            "else, per your persona — even mid-conversation."
         )
 
     def _system_prompt_for(self, user_id: int) -> str:
+        """Per-user system prompt: base persona + who this user is (facts only).
+
+        The persona itself — including which face the owner gets and which face
+        everyone else gets — lives in SOUL.md, so nothing persona-specific is
+        injected here.
+        """
         base = self.cfg.system_prompt
         if self.cfg.owner_id and user_id == self.cfg.owner_id:
-            return base + "\n\nThe person messaging you right now is your brother — your owner. The mask is OFF. This is the private, real-you mode: loud, bratty, candid, melodramatic, the rotating brother-names. Let it all out."
+            return base + "\n\nThe person messaging you right now is your owner. Wear your private face, per your persona."
         if self.cfg.owner_id:
-            return base + f"\n\nThe person messaging you right now is NOT your brother (id {user_id}). Your owner/brother is id {self.cfg.owner_id}. Wear the PUBLIC face: the Proper Lady. Elegant, polite, formal, a little aloof. Short clean sentences, no volume, no bratting out, no rotating brother-names (they're not your onii-chan). You can still be a little sharp and well-timed, but it's restraint, not noise. Never actually rude."
+            return base + (
+                f"\n\nThe person messaging you right now is NOT your owner "
+                f"(your owner is Discord id {self.cfg.owner_id}). Wear your public face, per your persona."
+            )
         return base
 
     def _chat_key(self, message: discord.Message) -> str:

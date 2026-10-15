@@ -130,7 +130,7 @@ ln -sf "$PWD/bin/discordbot" ~/.local/bin/discordbot
 | Var | Default | Notes |
 |---|---|---|
 | `DISCORD_BOT_TOKEN` | — | required |
-| `OWNER_ID` | empty | the user ID treated as the **owner** — in channels the bot wears its private persona (the "brother" face) for them and its public persona for everyone else (see SOUL.md → Group chat) |
+| `OWNER_ID` | empty | the user ID treated as the **owner** — the bot wears the private persona defined in `SOUL.md` for them and its public persona for everyone else (see SOUL.md → Group chat) |
 | `DISCORD_ALLOWED_USERS` | empty = allow all | comma-separated user IDs allowed to talk to the bot |
 | `REQUIRE_MENTION` | `1` | `0` = respond to every channel message (no @mention needed) |
 | `MODEL_BASE_URL` | `http://localhost:27906/v1` | any OpenAI-compatible endpoint |

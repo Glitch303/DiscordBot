@@ -10,7 +10,7 @@ Set `REQUIRE_MENTION=0` to have it answer every message in every channel it can 
 
 **Group chat awareness.** A channel is one shared conversation, not a bag of per-user chats:
 - Every user message in the channel — *mentioned or not* — is recorded in the channel session, so the bot reads the whole chat and can refer to things said minutes or hours ago.
-- In the model prompt each user message is prefixed with the speaker's name (`[Alice]`), and the channel system prompt tells it which face to wear: for the owner (Discord id `OWNER_ID`) the mask is off (the loud brother persona), for everyone else the Proper Lady persona (see `SOUL.md` → "Group chat").
+- In the model prompt each user message is prefixed with the speaker's name (`[Alice]`). The channel system prompt injects only the owner's identity (name + Discord id from `OWNER_ID`); which persona to wear for the owner vs. everyone else is defined in `SOUL.md` ("Group chat"), not in code.
 - Replies are still only triggered by a mention (or always, with `REQUIRE_MENTION=0`), and are addressed to whoever mentioned the bot.
 - `/new` resets the channel for **everyone** (shared session), so use it with that in mind.
 
