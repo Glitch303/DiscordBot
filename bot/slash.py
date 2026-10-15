@@ -130,11 +130,12 @@ def register(client):
     store = client.store
 
     async def _deny(interaction: app_commands.Interaction) -> None:
+        # discord.py 2.7: interaction.response is a property object, not a coroutine.
         try:
-            if interaction.response.pending:
-                await interaction.response(content="🔒 This bot is private.", ephemeral=True)
+            if not interaction.response.is_done():
+                await interaction.response.send_message(content="🔒 This bot is private.", ephemeral=True)
             else:
-                await interaction.followup(content="🔒 This bot is private.", ephemeral=True)
+                await interaction.followup.send(content="🔒 This bot is private.", ephemeral=True)
         except discord.DiscordException:
             pass
 
@@ -148,7 +149,7 @@ def register(client):
         if not client._is_allowed(interaction.user):
             return await _deny(interaction)
         store.end_current(_key(interaction), reason="slash_new")
-        await interaction.response(content="Fresh conversation started — `/resume` gets the old one back.")
+        await interaction.response.send_message(content="Fresh conversation started — `/resume` gets the old one back.")
 
     @tree.command(name="title", description="Name the current conversation (or show its name)")
     @app_commands.describe(name="New name; omit to show the current name")
@@ -156,7 +157,7 @@ def register(client):
         if not client._is_allowed(interaction.user):
             return await _deny(interaction)
         reply = client._title_command(_key(interaction), name or "", interaction.user.id)
-        await interaction.response(content=_fit(reply))
+        await interaction.response.send_message(content=_fit(reply))
 
     @tree.command(name="sessions", description="List this chat's conversations, or search them")
     @app_commands.describe(query="Optional search text — matches titles and message content")
@@ -165,7 +166,7 @@ def register(client):
             return await _deny(interaction)
         arg = f"search {query}" if query else ""
         reply = client._sessions_command(_key(interaction), arg, interaction.user.id)
-        await interaction.response(content=_fit(reply))
+        await interaction.response.send_message(content=_fit(reply))
 
     async def _session_autocomplete(interaction: app_commands.Interaction, current: str):
         return _picker_choices(client, _key(interaction))
@@ -190,7 +191,7 @@ def register(client):
             reply = client._resume_command(chat_key, session, interaction.user.id)
         else:
             reply = client._resume_command(chat_key, "", interaction.user.id)
-        await interaction.response(content=_fit(reply))
+        await interaction.response.send_message(content=_fit(reply))
 
     _attach_autocomplete(resume_cmd, "session", _session_autocomplete)
 
@@ -201,13 +202,13 @@ def register(client):
             return await _deny(interaction)
         sid, name = _resolve_ref(client, _key(interaction), session)
         if not sid:
-            return await interaction.response(
+            return await interaction.response.send_message(
                 content=f"No session found matching **{session[:60]}**.", ephemeral=True)
         deleted = await asyncio.to_thread(store.delete_session, sid)
         if not deleted:
-            return await interaction.response(content="That session is already gone.", ephemeral=True)
+            return await interaction.response.send_message(content="That session is already gone.", ephemeral=True)
         extra = "\nIt was the current conversation — a fresh one has been started." if deleted["new_session"] else ""
-        await interaction.response(content=_fit(f"🗑️ Deleted **{name}**." + extra), ephemeral=True)
+        await interaction.response.send_message(content=_fit(f"🗑️ Deleted **{name}**." + extra), ephemeral=True)
 
     _attach_autocomplete(delete_cmd, "session", _session_autocomplete)
 
@@ -217,27 +218,27 @@ def register(client):
     async def status_cmd(interaction: app_commands.Interaction) -> None:
         if not client._is_allowed(interaction.user):
             return await _deny(interaction)
-        await interaction.response(type=app_commands.ResponseType.defer_ephemeral)
-        await interaction.edit(content=await status_text(client))
+        await interaction.response.defer(ephemeral=True)
+        await interaction.response.edit_message(content=await status_text(client))
 
     @tree.command(name="start", description="Start the bot's systemd user service")
     async def start_cmd(interaction: app_commands.Interaction) -> None:
         if not client._is_allowed(interaction.user):
             return await _deny(interaction)
         if not await asyncio.to_thread(service_installed):
-            return await interaction.response(
+            return await interaction.response.send_message(
                 content="The service isn't installed — run `bash scripts/install-service.sh` (terminal) first.",
                 ephemeral=True)
         if await asyncio.to_thread(service_active) == "active":
-            return await interaction.response(content="▶️ Already running.", ephemeral=True)
-        await interaction.response(content="▶️ Starting the service…", ephemeral=True)
+            return await interaction.response.send_message(content="▶️ Already running.", ephemeral=True)
+        await interaction.response.send_message(content="▶️ Starting the service…", ephemeral=True)
         await asyncio.to_thread(_systemctl, "start")
         await asyncio.sleep(3)
         state = await asyncio.to_thread(service_active)
         if state == "active":
-            await interaction.followup(content="✅ Service is running again.", ephemeral=True)
+            await interaction.followup.send(content="✅ Service is running again.", ephemeral=True)
         else:
-            await interaction.followup(
+            await interaction.followup.send(
                 content=f"⚠️ Service state after start: **{state or 'unknown'}** — check `discordbot logs`.",
                 ephemeral=True)
 
@@ -245,14 +246,14 @@ def register(client):
     async def stop_cmd(interaction: app_commands.Interaction) -> None:
         if not client._is_allowed(interaction.user):
             return await _deny(interaction)
-        await interaction.response(content="🛑 Stopping the service — I'll be offline in a moment.", ephemeral=True)
+        await interaction.response.send_message(content="🛑 Stopping the service — I'll be offline in a moment.", ephemeral=True)
         asyncio.create_task(_deferred(_systemctl, "stop"))
 
     @tree.command(name="restart", description="Restart the bot's service (brief offline gap)")
     async def restart_cmd(interaction: app_commands.Interaction) -> None:
         if not client._is_allowed(interaction.user):
             return await _deny(interaction)
-        await interaction.response(content="🔄 Restarting the service — be right back.", ephemeral=True)
+        await interaction.response.send_message(content="🔄 Restarting the service — be right back.", ephemeral=True)
         asyncio.create_task(_deferred(_systemctl, "restart"))
 
     return tree

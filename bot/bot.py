@@ -46,15 +46,10 @@ class BotClient(discord.Client):
         log.info("logged in as %s (id=%s) | allowed users: %s | require_mention: %s",
                  self.user, self.user.id,
                  sorted(self.cfg.allowed_users) or "ALL", self.cfg.require_mention)
-        # Guild-scoped commands sync (nearly) instantly, unlike global (up to an
-        # hour). Register guild copies of the global commands in each server.
-        for g in self.guilds:
-            try:
-                if hasattr(self.tree, "copy_global_to"):
-                    self.tree.copy_global_to(guild=g)
-                await self.tree.sync(guild=g)
-            except discord.DiscordException:
-                log.exception("slash command guild sync failed for %s", g)
+        # NOTE: commands are registered GLOBALLY ONLY (like hermes-agent). Adding
+        # guild-scoped copies as well makes Discord show each command TWICE in the
+        # picker (global + guild entry). Trade-off: definition changes take up to
+        # an hour to propagate to servers (old definitions keep working meanwhile).
 
     async def close(self) -> None:
         self.model.close()
