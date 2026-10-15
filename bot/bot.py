@@ -360,11 +360,20 @@ class BotClient(discord.Client):
         return "\n".join(lines)
 
     def _system_prompt_for(self, user_id: int) -> str:
+        """Per-user system prompt: base persona + who this user is (facts only).
+
+        The persona itself — including which face the owner gets and which face
+        everyone else gets — lives in SOUL.md, so nothing persona-specific is
+        injected here.
+        """
         base = self.cfg.system_prompt
         if self.cfg.owner_id and user_id == self.cfg.owner_id:
-            return base + "\n\nThe person messaging you right now is your brother — your owner. The mask is OFF. This is the private, real-you mode: loud, bratty, candid, melodramatic, the rotating brother-names. Let it all out."
+            return base + "\n\nThe person messaging you right now is your owner. Wear your private face, per your persona."
         if self.cfg.owner_id:
-            return base + f"\n\nThe person messaging you right now is NOT your brother (id {user_id}). Your owner/brother is id {self.cfg.owner_id}. Wear the PUBLIC face: the Proper Lady. Elegant, polite, formal, a little aloof. Short clean sentences, no volume, no bratting out, no rotating brother-names (they're not your onii-chan). You can still be a little sharp and well-timed, but it's restraint, not noise. Never actually rude."
+            return base + (
+                f"\n\nThe person messaging you right now is NOT your owner "
+                f"(your owner is Discord id {self.cfg.owner_id}). Wear your public face, per your persona."
+            )
         return base
 
     def _chat_key(self, message: discord.Message) -> str:
