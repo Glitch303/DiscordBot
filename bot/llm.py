@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import logging
+import time
 
 import httpx
 
@@ -141,6 +142,10 @@ def tools_for(media: media_mod.MediaContext | None) -> list[dict]:
 
 
 class ModelClient:
+    # Retries for transient server-side hiccups (e.g. llama-swap (re)loading a
+    # model returns 500s for a while, or the connection is briefly refused).
+    RETRY_BACKOFFS = (5.0, 15.0, 45.0)  # ~65s total wait before giving up
+
     def __init__(self, base_url: str, model: str, api_key: str | None = None,
                  max_tokens: int = 1024, temperature: float = 0.7):
         headers = {"User-Agent": "discordbot/0.1"}
@@ -156,7 +161,10 @@ class ModelClient:
         self._client.close()
 
     def chat(self, messages: list[dict], tools: list[dict] | None = None) -> dict:
-        """One API call. Returns the raw response message dict."""
+        """One API call (with retries on transient server errors).
+
+        Returns the raw response message dict.
+        """
         body: dict = {
             "model": self.model,
             "messages": messages,
@@ -165,10 +173,27 @@ class ModelClient:
         }
         if tools:
             body["tools"] = tools
-        r = self._client.post(f"{self.base_url}/chat/completions", json=body)
-        r.raise_for_status()
-        data = r.json()
-        return data["choices"][0]["message"]
+        url = f"{self.base_url}/chat/completions"
+        attempt = 0
+        while True:
+            try:
+                r = self._client.post(url, json=body)
+                r.raise_for_status()
+                data = r.json()
+                return data["choices"][0]["message"]
+            except (httpx.HTTPStatusError, httpx.ConnectError, httpx.ConnectTimeout) as e:
+                transient = (
+                    isinstance(e, httpx.HTTPStatusError) and e.response.status_code >= 500
+                ) or isinstance(e, (httpx.ConnectError, httpx.ConnectTimeout))
+                if not transient or attempt >= len(self.RETRY_BACKOFFS):
+                    raise
+                delay = self.RETRY_BACKOFFS[attempt]
+                attempt += 1
+                log.warning(
+                    "transient model server error (%s) — retry %d/%d in %.0fs",
+                    e, attempt, len(self.RETRY_BACKOFFS), delay,
+                )
+                time.sleep(delay)
 
 
 def run_agent(
