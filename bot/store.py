@@ -358,6 +358,48 @@ class SessionStore:
             ).fetchone()
         return row["session_id"] if row else None
 
+    def delete_session(self, session_id: str) -> dict | None:
+        """Delete a session and all its messages.
+
+        Returns ``{id, title, new_session}`` — ``new_session`` is True when the
+        session was this chat's active one, in which case a fresh replacement
+        is created so the chat keeps working (same as ``/new``). ``None`` when
+        the id is unknown.
+        """
+        with self._lock:
+            row = self._conn.execute(
+                "SELECT id, title FROM sessions WHERE id = ?", (session_id,)
+            ).fetchone()
+            if not row:
+                return None
+            self._conn.execute("DELETE FROM messages WHERE session_id = ?", (session_id,))
+            self._conn.execute("DELETE FROM sessions WHERE id = ?", (session_id,))
+            # Children lose their lineage pointer (no FK on parent_session_id,
+            # but don't leave dangling references around).
+            self._conn.execute(
+                "UPDATE sessions SET parent_session_id = NULL WHERE parent_session_id = ?",
+                (session_id,),
+            )
+            bound = self._conn.execute(
+                "SELECT session_key FROM chat_sessions WHERE session_id = ?", (session_id,)
+            ).fetchone()
+            new_session = False
+            if bound:
+                new_id = _new_id()
+                now = _now()
+                self._conn.execute(
+                    "INSERT INTO sessions (id, session_key, started_at, last_activity_at) "
+                    "VALUES (?,?,?,?)",
+                    (new_id, bound["session_key"], now, now),
+                )
+                self._conn.execute(
+                    "UPDATE chat_sessions SET session_id = ? WHERE session_key = ?",
+                    (new_id, bound["session_key"]),
+                )
+                new_session = True
+            self._conn.commit()
+            return {"id": row["id"], "title": row["title"], "new_session": new_session}
+
     def user_message_count(self, session_id: str) -> int:
         with self._lock:
             row = self._conn.execute(

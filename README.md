@@ -37,6 +37,10 @@ bot/llm.py  (agent loop, max 4 tool rounds)
    ├── tool: search_gifs / send_file → bot/media.py → Giphy/Klipy API + download to downloads/
    ├── tool: search_stickers / send_sticker → bot/media.py → Discord sticker packs (cached)
    └── chat completions  → bot/llm.py → MODEL_BASE_URL (OpenAI-compatible)
+
+bot/slash.py  native Discord slash commands (Hermes-style app commands):
+              /new /title /sessions /resume /delete /status /start /stop /restart
+              — routed into the same handlers as the text commands above
 ```
 
 Everything is plain Python you can read top to bottom in ~500 lines.
@@ -54,6 +58,7 @@ bot/
   attachments.py  image/file/link/sticker → model message parts
   media.py        outbound media: GIF search, file downloads, sticker index, send queue
   store.py        SQLite session ledger: sessions, messages, /resume (Hermes-style)
+  slash.py        native Discord slash commands (app commands + session picker, Hermes-style)
 scripts/
   setup.sh              create venv + install deps + seed .env
   start.sh              run in foreground
@@ -154,6 +159,8 @@ If `SOUL.md` is missing, a minimal built-in persona is used as a fallback.
 
 ## In-Discord commands
 
+### Text commands (typed as a normal message)
+
 | Command | Effect |
 |---|---|
 | `/new` or `/reset` | start a fresh conversation (the old one is kept, resumable) |
@@ -166,6 +173,26 @@ If `SOUL.md` is missing, a minimal built-in persona is used as a fallback.
 | `/help` | capability summary |
 
 Everything else is natural language. Mention the bot in a channel (`@Bot what's the weather in Tokyo`) or just DM it.
+
+### Slash commands (type `/` in Discord — Hermes-style app commands)
+
+Like Hermes Agent, the commands are also registered as **native Discord application
+commands** (`bot/slash.py`): they appear in the app's command menu with typed
+options and an autocomplete session picker, and route into the same handlers as
+the text commands (which keep working). Global sync powers DMs; each server gets
+instant guild-scoped copies on startup.
+
+| Command | Effect |
+|---|---|
+| `/new` | start a fresh conversation (old one stays resumable) |
+| `/title name:…` | name the current conversation (omit `name` to show it) |
+| `/sessions query:…` | list / search this chat's conversations |
+| `/resume session:…` | resume a conversation — pick from the autocomplete list or type number/title/id; omit for the menu |
+| `/delete session:…` | delete the picked conversation (and all its messages); if it was the current one, a fresh one is started |
+| `/status` | service state + bot login + model/SearXNG/token health (ephemeral) |
+| `/start` | start the systemd user service |
+| `/stop` | stop the service (the bot goes offline after replying) |
+| `/restart` | restart the service (brief offline gap) |
 
 ## Sessions & history (Hermes-style)
 

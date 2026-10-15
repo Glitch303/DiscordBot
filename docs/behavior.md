@@ -22,6 +22,7 @@ Set `REQUIRE_MENTION=0` to have it answer every message in every channel it can 
   - `/sessions search <q>` → matches titles and message content.
   - `/sessions <name|id>` → same as `/resume <name|id>`.
   - Naming a session (`/title <name>`) is still the clean way to make it findable by name.
+- **Discord slash commands (Hermes-style app commands, `bot/slash.py`):** the same commands are registered as native application commands (type `/` in the app) with typed options and an **autocomplete session picker** on `/resume` and `/delete`. Interactions route into the same handlers as the text commands, which keep working unchanged. `/delete session:…` is slash-only: it removes the picked session (and all its messages); if it was the chat's current session, a fresh one is started so the chat keeps working. `/status` shows service + bot + backend health; `/start` `/stop` `/restart` control the systemd user service (stop/restart reply first, then act, so the message lands before the process goes down). Global sync covers DMs (can take up to an hour to propagate); each server gets instant guild-scoped copies on startup.
 
 ## Links
 Bare URLs in a message (up to 3) are **auto-fetched** and handed to the model as context, so "what's this about?" + a link works without extra tool calls. The model can also fetch more via `fetch_url` itself.

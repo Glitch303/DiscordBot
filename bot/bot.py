@@ -13,6 +13,7 @@ from .attachments import describe_attachments, describe_stickers, extract_urls
 from .config import Config
 from .llm import ModelClient, run_agent
 from .media import MediaContext, MediaSend
+from . import slash
 from .store import SessionStore
 from .web import Web
 
@@ -29,17 +30,31 @@ class BotClient(discord.Client):
         self.web = Web(cfg.searxng_url)
         self.store = SessionStore(cfg.data_dir)
         self._busy: set[str] = set()
+        self.tree = slash.register(self)  # Discord app commands (Hermes-style)
 
     # ---- lifecycle -------------------------------------------------------
 
     async def setup_hook(self) -> None:
         self._fetch_reactions = True
+        try:
+            await self.tree.sync()  # global commands (these power DMs)
+        except discord.DiscordException:
+            log.exception("slash command sync failed")
 
     async def on_ready(self) -> None:
         assert self.user is not None
         log.info("logged in as %s (id=%s) | allowed users: %s | require_mention: %s",
                  self.user, self.user.id,
                  sorted(self.cfg.allowed_users) or "ALL", self.cfg.require_mention)
+        # Guild-scoped commands sync (nearly) instantly, unlike global (up to an
+        # hour). Register guild copies of the global commands in each server.
+        for g in self.guilds:
+            try:
+                if hasattr(self.tree, "copy_global_to"):
+                    self.tree.copy_global_to(guild=g)
+                await self.tree.sync(guild=g)
+            except discord.DiscordException:
+                log.exception("slash command guild sync failed for %s", g)
 
     async def close(self) -> None:
         self.model.close()
@@ -242,29 +257,33 @@ class BotClient(discord.Client):
                 "`/title <name>` — name this conversation\n"
                 "`/sessions [search <q> | <name>]` — list this chat's conversations\n"
                 "`/resume [number | name]` — menu, or jump back to an old conversation\n"
-                "`/help` — this message"
+                "`/help` — this message\n"
+                "Also in Discord's slash menu (type `/`): `/new` `/title` `/sessions` `/resume` `/delete` with an autocomplete session picker, plus `/status` `/start` `/stop` `/restart` for service control."
                 + ("" if is_dm else "\nMention me (@me) to get my attention in this channel.")
             )
 
         if cmd == "title":
-            session_id = self.store.ensure_session(chat_key, message.author.id)
-            if not arg:
-                t = self.store.session_title(session_id)
-                return f"Current title: {t if t else '(untitled)'} — set one with `/title <name>`"
-            self.store.set_title(session_id, arg[:80])
-            return f"Title set to: {arg[:80]}"
+            return self._title_command(chat_key, arg, message.author.id)
 
         if cmd == "sessions":
-            return self._sessions_command(message, chat_key, arg)
+            return self._sessions_command(chat_key, arg, message.author.id)
 
         if cmd == "resume":
-            return self._resume_command(message, chat_key, arg)
+            return self._resume_command(chat_key, arg, message.author.id)
 
         return None
 
+    def _title_command(self, chat_key: str, arg: str, user_id: int) -> str:
+        session_id = self.store.ensure_session(chat_key, user_id)
+        if not arg:
+            t = self.store.session_title(session_id)
+            return f"Current title: {t if t else '(untitled)'} — set one with `/title <name>`"
+        self.store.set_title(session_id, arg[:80])
+        return f"Title set to: {arg[:80]}"
+
     # ---- /resume & /sessions (Hermes-style menus) ---------------------------
 
-    def _sessions_command(self, message: discord.Message, chat_key: str, arg: str) -> str:
+    def _sessions_command(self, chat_key: str, arg: str, user_id: int) -> str:
         parts = arg.split()
         target_parts: list[str] = []
         for i, part in enumerate(parts):
@@ -284,13 +303,13 @@ class BotClient(discord.Client):
         target = " ".join(target_parts).strip()
         if target:
             # /sessions <name|id> == /resume <name|id>
-            return self._resume_command(message, chat_key, target)
+            return self._resume_command(chat_key, target, user_id)
         rows = self.store.list_sessions(chat_key)
         if not rows:
             return "No sessions here yet — just start talking."
         return self._format_session_listing(rows, "Sessions")
 
-    def _resume_command(self, message: discord.Message, chat_key: str, arg: str) -> str:
+    def _resume_command(self, chat_key: str, arg: str, user_id: int) -> str:
         ref = _strip_resume_name(arg)
         if not ref:
             rows = self.store.list_sessions(chat_key)
@@ -324,7 +343,7 @@ class BotClient(discord.Client):
 
         if self.store.current_session_id(chat_key) == sid:
             return f"📌 Already on session **{name}**."
-        if not self.store.resume(chat_key, sid, message.author.id):
+        if not self.store.resume(chat_key, sid, user_id):
             return "Failed to switch session."
         count = self.store.user_message_count(sid)
         if count == 0:
@@ -359,6 +378,13 @@ class BotClient(discord.Client):
         if isinstance(channel, discord.DMChannel):
             return f"dm-{message.author.id}"
         return f"ch-{channel.id}-{message.author.id}"
+
+    def _chat_key_for(self, interaction) -> str:
+        """Same keying as ``_chat_key``, for app-command interactions (slash menu)."""
+        channel = interaction.channel
+        if channel is None or isinstance(channel, discord.DMChannel):
+            return f"dm-{interaction.user.id}"
+        return f"ch-{channel.id}-{interaction.user.id}"
 
 
 def _describe_media(it: dict) -> str:
