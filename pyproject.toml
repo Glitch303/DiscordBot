@@ -9,4 +9,5 @@ dependencies = [
     "beautifulsoup4>=4.12",
     "lxml>=5.0",
     "python-dotenv>=1.0",
+    "youtube-transcript-api>=1.2",
 ]

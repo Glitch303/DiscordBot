@@ -7,6 +7,7 @@ import time
 import httpx
 
 from . import media as media_mod
+from . import youtube
 
 log = logging.getLogger("bot.model")
 
@@ -42,6 +43,28 @@ TOOL_SCHEMAS = [
                 "type": "object",
                 "properties": {
                     "url": {"type": "string", "description": "The URL to fetch"},
+                },
+                "required": ["url"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "transcribe_youtube",
+            "description": (
+                "Get the transcript (captions) of a YouTube video. Use when the user "
+                "shares or names a YouTube video and you need what's actually said in it "
+                "— to summarize, quote, or discuss it. Accepts a full YouTube URL "
+                "(watch/youtu.be/shorts/live) or a bare video ID. Returns the video "
+                "title, author, and the caption text in [mm:ss]-stamped blocks. If the "
+                "video has no captions (or they're disabled), the tool says so — tell "
+                "the user, don't guess the content."
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "url": {"type": "string", "description": "YouTube URL or video ID"},
                 },
                 "required": ["url"],
             },
@@ -186,6 +209,14 @@ class ModelClient:
                     isinstance(e, httpx.HTTPStatusError) and e.response.status_code >= 500
                 ) or isinstance(e, (httpx.ConnectError, httpx.ConnectTimeout))
                 if not transient or attempt >= len(self.RETRY_BACKOFFS):
+                    if isinstance(e, httpx.HTTPStatusError):
+                        # Surface the server's own error body — a bare "500 Internal
+                        # Server Error" from an OpenAI-compatible server is useless.
+                        try:
+                            detail = e.response.text[:500]
+                        except Exception:
+                            detail = ""
+                        log.error("model server error: %s — response: %s", e, detail)
                     raise
                 delay = self.RETRY_BACKOFFS[attempt]
                 attempt += 1
@@ -244,6 +275,8 @@ def run_agent(
                 result = web.search(args.get("query", ""))
             elif name == "fetch_url":
                 result = web.fetch(args.get("url", ""))
+            elif name == "transcribe_youtube":
+                result = youtube.transcribe(args.get("url", ""), web)
             elif media is not None and name == "search_gifs":
                 result = media.tool_search_gifs(args.get("query", ""))
             elif media is not None and name == "send_file":

@@ -36,6 +36,8 @@ Set `REQUIRE_MENTION=0` to have it answer every message in every channel it can 
 ## Links
 Bare URLs in a message (up to 3) are **auto-fetched** and handed to the model as context, so "what's this about?" + a link works without extra tool calls. The model can also fetch more via `fetch_url` itself.
 
+**YouTube links** (watch / youtu.be / shorts / live / embed) are handled specially: instead of fetching the JS-heavy watch page, the bot pulls the video's **captions** (`bot/youtube.py`, via `youtube-transcript-api`) and hands the model the title, author, and the transcript in `[mm:ss]`-stamped blocks (capped at ~16 KB). Language preference is English → Indonesian, falling back to whatever caption track exists. Videos with no captions / captions disabled / that are private or region-locked come back as a short failure note the model can relay.
+
 ## Attachments
 | Type | What happens |
 |---|---|
@@ -59,6 +61,7 @@ The agent can send things back to you, not just talk:
 ## Web tools (model-decided)
 - `web_search(query)` — SearXNG, returns 5 results (title + URL + snippet)
 - `fetch_url(url)` — readable text of the page (scripts/styles stripped, ~12 KB cap)
+- `transcribe_youtube(url_or_id)` — captions of a YouTube video (title, author, `[mm:ss]` transcript, ~16 KB cap); used when the user names/asks about a video that wasn't linked in the message
 - The agent loop allows up to **4 tool rounds** per message before it must answer.
 
 ## Errors

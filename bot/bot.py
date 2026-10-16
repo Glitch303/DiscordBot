@@ -13,7 +13,7 @@ from .attachments import describe_attachments, describe_stickers, extract_urls
 from .config import Config
 from .llm import ModelClient, run_agent
 from .media import MediaContext, MediaSend
-from . import slash
+from . import slash, youtube
 from .store import SessionStore
 from .web import Web
 
@@ -124,7 +124,10 @@ class BotClient(discord.Client):
                 fetches = []
                 for u in urls[:3]:
                     try:
-                        fetches.append(self.web.fetch(u))
+                        if youtube.is_youtube_url(u):
+                            fetches.append(youtube.transcribe(u, self.web))
+                        else:
+                            fetches.append(self.web.fetch(u))
                     except Exception as e:
                         fetches.append(f"[fetch_url] failed: {e}")
                 if fetches:
@@ -279,7 +282,7 @@ class BotClient(discord.Client):
 
         if cmd in ("help", "status"):
             return (
-                "**What I can do:** chat, web search, read links you send, look at images, read text files, send GIFs/stickers/files back.\n"
+                "**What I can do:** chat, web search, read links you send (YouTube links get transcribed for me), look at images, read text files, send GIFs/stickers/files back.\n"
                 "`/new` — start a fresh conversation\n"
                 "`/title <name>` — name this conversation\n"
                 "`/sessions [search <q> | <name>]` — list this chat's conversations\n"
@@ -482,7 +485,7 @@ class BotClient(discord.Client):
         if self.cfg.owner_id:
             return base + (
                 f"\n\nThe person messaging you right now is NOT your owner "
-                f"(your owner is Discord id {self.cfg.owner_id}). Wear your public face, per your persona."
+                f"Your owner is Discord id {self.cfg.owner_id}. Wear your public face, per your persona."
             )
         return base
 

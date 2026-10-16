@@ -13,6 +13,7 @@ A **standalone** general-chat Discord bot in pure Python. No Hermes Agent, no fr
 | 👁️ Sees images | Uploads images → base64 → multimodal model actually looks at them |
 | 📎 Reads files | Text/code files are inlined into the prompt; PDFs/media are described |
 | 🔗 Link understanding | Bare links in a message are auto-fetched and given to the model as context |
+| 📺 YouTube transcripts | YouTube links get their **captions** auto-fetched (title + author + `[mm:ss]` transcript) instead of the JS-heavy watch page; the model can also call `transcribe_youtube` on demand. No API key |
 | 🎬 Sends GIFs | `search_gifs` (Giphy and/or Klipy keys — see below) → `send_file` posts the .gif as an attachment |
 | 🏷️ Sends stickers | `search_stickers` (Discord's official 14 sticker packs + this server's stickers) → `send_sticker` |
 | 📤 Sends files | `send_file` sends any file back — a URL (auto-downloaded) or a file the user sent |
@@ -29,12 +30,13 @@ Discord (DM / channels)
 bot/main.py → bot/bot.py  (BotClient)
    ├── mention gating, allowlist, /new /help, typing indicator
    ├── downloads attachments → temp files
-   ├── auto-fetches links in messages (httpx + BeautifulSoup)
+   ├── auto-fetches links in messages (httpx + BeautifulSoup; YouTube links → bot/youtube.py captions)
    ├── builds OpenAI-format conversation (store.py keeps per-session history per mode: shared channel sessions with [Name] sender labels, or isolated per-user sessions)
    ▼
 bot/llm.py  (agent loop, max 4 tool rounds)
    ├── tool: web_search  → bot/web.py → SearXNG @ localhost:8080 (JSON)
    ├── tool: fetch_url   → bot/web.py → httpx + BeautifulSoup
+   ├── tool: transcribe_youtube → bot/youtube.py → youtube-transcript-api + keyless oEmbed (title/author)
    ├── tool: search_gifs / send_file → bot/media.py → Giphy/Klipy API + download to downloads/
    ├── tool: search_stickers / send_sticker → bot/media.py → Discord sticker packs (cached)
    └── chat completions  → bot/llm.py → MODEL_BASE_URL (OpenAI-compatible)
@@ -56,6 +58,7 @@ bot/
   bot.py          discord.Client subclass: message handling, sessions
   llm.py          OpenAI-compatible client + tool-calling agent loop
   web.py          SearXNG search + URL text extraction
+  youtube.py      YouTube captions: URL/ID parsing, oEmbed metadata, transcript formatting
   attachments.py  image/file/link/sticker → model message parts
   media.py        outbound media: GIF search, file downloads, sticker index, send queue
   store.py        SQLite session ledger: sessions, messages, /resume (Hermes-style)
