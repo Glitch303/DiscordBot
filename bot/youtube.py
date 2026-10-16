@@ -12,7 +12,9 @@ title/author come from the keyless oEmbed endpoint.
 from __future__ import annotations
 
 import logging
+import os
 import re
+import time
 from urllib.parse import parse_qs, urlparse
 
 log = logging.getLogger("bot.youtube")
@@ -20,6 +22,7 @@ log = logging.getLogger("bot.youtube")
 TRANSCRIPT_MAX_CHARS = 16_000
 LANGUAGE_PRIORITY = ("en", "id")  # the bot's two conversation languages, in priority order
 BLOCK_SECONDS = 15                # group caption segments into ~15s blocks (one line per block)
+RETRY_BACKOFFS = (3.0, 8.0)       # waits between attempts when YouTube rate-limits this IP
 
 _VIDEO_ID_RE = re.compile(r"^[A-Za-z0-9_-]{11}$")
 _PATH_ID_RE = re.compile(r"^/(?:shorts|live|embed)/([A-Za-z0-9_-]{11})")
@@ -130,6 +133,55 @@ def _format_blocks(segments: list[dict], max_chars: int) -> tuple[str, bool]:
     return "\n".join(out), truncated
 
 
+def _proxy_config():
+    """Optional proxy for the transcript API (escape hatch for blocked IPs).
+
+    Set YOUTUBE_HTTP_PROXY in .env, e.g. http://user:pass@host:port.
+    """
+    url = os.environ.get("YOUTUBE_HTTP_PROXY", "").strip()
+    if not url:
+        return None
+    from youtube_transcript_api.proxies import GenericProxyConfig
+    return GenericProxyConfig(http_url=url, https_url=url)
+
+
+def _fetch_transcript(vid: str):
+    """list() + find preferred-language track + fetch, with IP-block retries.
+
+    YouTube rate-limits IPs that make too many transcript requests in a short
+    time (cloud IPs get blocked harder). The block is usually transient, so
+    retry a couple of times with backoff before giving up. Deterministic
+    failures (no captions, video unavailable, ...) are NOT retried.
+    """
+    from youtube_transcript_api import (
+        IpBlocked,
+        RequestBlocked,
+        YouTubeRequestFailed,
+        YouTubeTranscriptApi,
+    )
+
+    transient = (RequestBlocked, IpBlocked, YouTubeRequestFailed)
+    last = None
+    for attempt, delay in enumerate((0.0, *RETRY_BACKOFFS)):
+        if delay:
+            log.info("YouTube rate-limited this IP — transcript retry %d/%d in %.0fs",
+                     attempt, len(RETRY_BACKOFFS), delay)
+            time.sleep(delay)
+        try:
+            tlist = YouTubeTranscriptApi(proxy_config=_proxy_config()).list(vid)
+            try:
+                return tlist.find_transcript(LANGUAGE_PRIORITY).fetch(preserve_formatting=False)
+            except Exception:
+                # Preferred languages (en/id) missing — take whatever track exists.
+                fallback = list(tlist)
+                if not fallback:
+                    raise
+                return fallback[0].fetch(preserve_formatting=False)
+        except transient as e:
+            last = e
+    raise last
+
+
 def transcribe(url_or_id: str, web) -> str:
     """Fetch the caption transcript for a YouTube URL or video ID.
 
@@ -138,10 +190,7 @@ def transcribe(url_or_id: str, web) -> str:
     TRANSCRIPT_MAX_CHARS). Failures come back as a ``[youtube] ...`` note,
     same contract as ``Web.fetch`` — this never raises.
     """
-    from youtube_transcript_api import (
-        YouTubeTranscriptApi,
-        YouTubeTranscriptApiException,
-    )
+    from youtube_transcript_api import YouTubeTranscriptApiException
 
     vid = video_id(url_or_id)
     if not vid:
@@ -149,16 +198,7 @@ def transcribe(url_or_id: str, web) -> str:
     watch = f"https://www.youtube.com/watch?v={vid}"
 
     try:
-        tlist = YouTubeTranscriptApi().list(vid)
-        try:
-            transcript = tlist.find_transcript(LANGUAGE_PRIORITY)
-        except Exception:
-            # Preferred languages (en/id) missing — take whatever track exists.
-            fallback = list(tlist)
-            if not fallback:
-                raise
-            transcript = fallback[0]
-        fetched = transcript.fetch(preserve_formatting=False)
+        fetched = _fetch_transcript(vid)
     except YouTubeTranscriptApiException as e:
         return f"[youtube] {watch}: {_failure_reason(e)}"
 
@@ -178,15 +218,23 @@ def transcribe(url_or_id: str, web) -> str:
 
 
 def _failure_reason(e: Exception) -> str:
+    """Short, actionable failure notes (the model relays these to the user)."""
     name = type(e).__name__
     friendly = {
-        "TranscriptsDisabled": "captions are disabled for this video",
+        "TranscriptsDisabled": (
+            "captions are disabled for this video — there's no spoken text to transcribe. "
+            "Tell the user, don't guess what's in it."
+        ),
         "NoTranscriptFound": "no captions/subtitles are available for this video",
         "VideoUnavailable": "the video is unavailable (private, removed, or region-locked)",
         "AgeRestricted": "the video is age-restricted — captions can't be fetched",
+        "RequestBlocked": (
+            "YouTube is temporarily blocking requests from this IP (rate limit). "
+            "Try again in a few minutes."
+        ),
         "IpBlocked": "YouTube blocked the request from this IP",
     }.get(name)
     if friendly:
         return friendly
     msg = str(e)
-    return f"couldn't fetch the transcript ({msg[:200]})"
+    return f"couldn't fetch the transcript ({msg[:120]})"

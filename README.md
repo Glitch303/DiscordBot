@@ -145,6 +145,7 @@ ln -sf "$PWD/bin/discordbot" ~/.local/bin/discordbot
 | `MAX_ATTACHMENT_BYTES` | `25000000` | skip bigger uploads (also caps what the bot downloads/sends) |
 | `GIPHY_API_KEY` | unset | optional; enables `search_gifs` via Giphy. Free key: https://developers.giphy.com/ — the free tier is **~30 requests/min and 50,000 impressions/month** (enough for one bot; the rate limit resets at the top of each hour) |
 | `KLIPY_API_KEY` | unset | optional; alternative GIF provider (https://partner.klipy.com/, free — 100 req/hr in testing mode, unlimited once production is approved). With both keys set the bot falls back to Klipy when Giphy fails |
+| `YOUTUBE_HTTP_PROXY` | unset | optional; proxy (`http://user:pass@host:port`) for the YouTube transcript API — escape hatch if YouTube persistently blocks your IP (transient rate-limits are retried automatically) |
 | `GIF_PROVIDER` | `auto` | `auto` = Giphy then Klipy; force `giphy` or `klipy` to use only one |
 | `SESSION_MODE` | `shared` | `shared` = one shared session per channel (whole-chat context, `[Name]` labels); `per_user` = one isolated session per user per channel. Each mode has its own database (`data/sessions_shared.db` / `data/sessions_per_user.db`). Switch with `discordbot session-mode <mode>` or `/session-mode` (both restart the bot) |
 

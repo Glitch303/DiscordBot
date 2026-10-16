@@ -1,6 +1,7 @@
 """Minimal OpenAI-compatible chat client with tool calling."""
 from __future__ import annotations
 
+import json
 import logging
 import time
 
@@ -37,7 +38,9 @@ TOOL_SCHEMAS = [
             "description": (
                 "Fetch a web page and return its readable text content. Use when you "
                 "have a URL (from web_search or the user) and need the full page text "
-                "to answer accurately or to summarize it."
+                "to answer accurately or to summarize it. Do NOT use it for YouTube "
+                "URLs — the watch page is just JavaScript; use transcribe_youtube "
+                "instead."
             ),
             "parameters": {
                 "type": "object",
@@ -204,10 +207,11 @@ class ModelClient:
                 r.raise_for_status()
                 data = r.json()
                 return data["choices"][0]["message"]
-            except (httpx.HTTPStatusError, httpx.ConnectError, httpx.ConnectTimeout) as e:
+            except (httpx.HTTPStatusError, httpx.ConnectError, httpx.ConnectTimeout,
+                    json.JSONDecodeError) as e:
                 transient = (
                     isinstance(e, httpx.HTTPStatusError) and e.response.status_code >= 500
-                ) or isinstance(e, (httpx.ConnectError, httpx.ConnectTimeout))
+                ) or isinstance(e, (httpx.ConnectError, httpx.ConnectTimeout, json.JSONDecodeError))
                 if not transient or attempt >= len(self.RETRY_BACKOFFS):
                     if isinstance(e, httpx.HTTPStatusError):
                         # Surface the server's own error body — a bare "500 Internal

@@ -111,7 +111,10 @@ class BotClient(discord.Client):
                         suffix=Path(att.filename).suffix or ".bin",
                         dir=self.cfg.downloads_dir, delete=False
                     ) as f:
-                        await att.save(f)
+                        # save(f.name), not f: Python 3.14's NamedTemporaryFile
+                        # returns a _TemporaryFileWrapper, which discord.py's
+                        # save() doesn't recognise as a file-like object.
+                        await att.save(f.name)
                         files.append((Path(f.name), att.content_type))
                 except Exception as e:
                     log.warning("attachment download failed: %s", e)
