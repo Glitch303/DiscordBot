@@ -47,6 +47,7 @@ class Config:
     # Discord
     discord_token: str
     allowed_users: frozenset[int]
+    allowed_bot_ids: frozenset[int] | None  # None = all bots allowed, empty = no bots
     require_mention: bool
     owner_id: int | None
 
@@ -90,10 +91,18 @@ def load() -> Config:
         for x in os.environ.get("DISCORD_ALLOWED_USERS", "").split(",")
         if x.strip().isdigit()
     )
+    bots_raw = os.environ.get("DISCORD_ALLOWED_BOT_IDS", "").strip()
+    if bots_raw.lower() == "all":
+        allowed_bots: frozenset[int] | None = None  # all bots
+    else:
+        allowed_bots = frozenset(
+            int(x) for x in bots_raw.split(",") if x.strip().isdigit()
+        )
     owner_raw = os.environ.get("OWNER_ID", "").strip()
     return Config(
         discord_token=os.environ["DISCORD_BOT_TOKEN"],
         allowed_users=allowed,
+        allowed_bot_ids=allowed_bots,
         owner_id=int(owner_raw) if owner_raw.isdigit() else None,
         require_mention=os.environ.get("REQUIRE_MENTION", "1") not in ("0", "false", ""),
         model_base_url=os.environ.get("MODEL_BASE_URL", "http://localhost:27906/v1").rstrip("/"),

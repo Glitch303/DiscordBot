@@ -8,6 +8,8 @@ By default (`REQUIRE_MENTION=1`) the bot only answers when **@mentioned**. It ig
 
 Set `REQUIRE_MENTION=0` to have it answer every message in every channel it can see (be careful in busy servers — token costs add up).
 
+**Messages from other bots.** Discord delivers other bots' messages to your bot, but they are dropped by default to prevent bot-to-bot ping-pong loops. Control this with `DISCORD_ALLOWED_BOT_IDS`: empty/unset = ignore all bots (default), `all` = accept every bot, or a comma-separated list of bot IDs to allow only those. Allowed bot messages are treated like any other: unmentioned ones are recorded as context (shared mode), mentioned ones get a reply. Note: with `REQUIRE_MENTION=0`, two bots that both answer everything can talk to each other forever.
+
 **Group chat awareness** (shared mode only). A channel is one shared conversation, not a bag of per-user chats:
 - Every user message in the channel — *mentioned or not* — is recorded in the channel session, so the bot reads the whole chat and can refer to things said minutes or hours ago.
 - In the model prompt each user message is prefixed with the speaker's name (`[Alice]`). The channel system prompt injects only the owner's identity (name + Discord id from `OWNER_ID`); which persona to wear for the owner vs. everyone else is defined in `SOUL.md` ("Group chat"), not in code.

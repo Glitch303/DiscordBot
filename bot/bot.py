@@ -44,9 +44,11 @@ class BotClient(discord.Client):
 
     async def on_ready(self) -> None:
         assert self.user is not None
-        log.info("logged in as %s (id=%s) | allowed users: %s | require_mention: %s",
+        bots = ("all" if self.cfg.allowed_bot_ids is None
+                else sorted(self.cfg.allowed_bot_ids) or "none")
+        log.info("logged in as %s (id=%s) | allowed users: %s | allowed bots: %s | require_mention: %s",
                  self.user, self.user.id,
-                 sorted(self.cfg.allowed_users) or "ALL", self.cfg.require_mention)
+                 sorted(self.cfg.allowed_users) or "ALL", bots, self.cfg.require_mention)
         # NOTE: commands are registered GLOBALLY ONLY (like hermes-agent). Adding
         # guild-scoped copies as well makes Discord show each command TWICE in the
         # picker (global + guild entry). Trade-off: definition changes take up to
