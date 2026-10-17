@@ -208,9 +208,17 @@ class BotClient(discord.Client):
                     else:
                         user_content.append({"type": "text", "text":
                             f"(You are replying to {name} — not your owner. Public face.)"})
+                note = self._mention_roster_note(session_id, message)
+                if note:
+                    user_content.append({"type": "text", "text": note})
             else:
                 system = self._system_prompt_for(message.author.id)
-                user_content = parts
+                # Copy: the roster note is appended below and must NOT be
+                # persisted with the turn (parts is what gets stored).
+                user_content = [dict(p) for p in parts]
+                note = self._mention_roster_note(session_id, message)
+                if note:
+                    user_content.append({"type": "text", "text": note})
             convo: list[dict] = [{"role": "system", "content": system}]
             convo.extend(history)
             convo.append({"role": "user", "content": user_content})
@@ -512,6 +520,30 @@ class BotClient(discord.Client):
                 f"Your owner is Discord id {self.cfg.owner_id}. Wear your public face, per your persona."
             )
         return base
+
+    def _mention_roster_note(self, session_id: str, message: discord.Message) -> str:
+        """Per-turn note listing the real Discord ids known in this session, so
+        the model can @mention (tag) people by writing ``<@id>`` without
+        inventing ids. Ephemeral: rebuilt each turn, never persisted.
+        """
+        people: dict[int, str] = {}
+        for uid, name in self.store.sender_roster(session_id):
+            people[uid] = name
+        for m in message.mentions:
+            if m.id not in people:
+                people[m.id] = m.display_name
+        if not people:
+            return ""
+        roster = "\n".join(f"  {name} — {uid}" for uid, name in people.items())
+        return (
+            "## Tagging (mentions)\n"
+            "You can @mention (tag) people in your reply by writing <@ID> — it pings them. "
+            "Use ONLY the exact ids from this roster; never invent, guess, or compute an id. "
+            "Tag sparingly: to answer someone directly, call their attention, or hand the "
+            "conversation to them. If the person isn't in the roster, refer to them by name "
+            "without a mention.\n"
+            f"Roster (name — Discord id):\n{roster}"
+        )
 
     def _chat_key(self, message: discord.Message) -> str:
         """Session key, per ``SESSION_MODE``.

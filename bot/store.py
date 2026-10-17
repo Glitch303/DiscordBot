@@ -627,6 +627,24 @@ class SessionStore:
             self._conn.commit()
             return {"id": row["id"], "title": row["title"], "new_session": new_session}
 
+    def sender_roster(self, session_id: str, limit: int = 20) -> list[tuple[int, str]]:
+        """Distinct (user_id, display name) pairs of people who spoke in this session.
+
+        Most recent speakers first. Feeds the per-turn mention roster so the
+        model can @tag people with REAL Discord ids instead of inventing them.
+        """
+        with self._lock:
+            rows = self._conn.execute(
+                """SELECT m.user_id, m.sender
+                   FROM messages m
+                   JOIN (SELECT user_id, MAX(id) AS mid FROM messages
+                         WHERE session_id = ? AND role = 'user' AND user_id IS NOT NULL
+                         GROUP BY user_id) g ON g.mid = m.id
+                   ORDER BY m.id DESC LIMIT ?""",
+                (session_id, limit),
+            ).fetchall()
+        return [(r["user_id"], r["sender"] or f"id:{r['user_id']}") for r in rows]
+
     def user_message_count(self, session_id: str) -> int:
         with self._lock:
             row = self._conn.execute(

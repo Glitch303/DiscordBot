@@ -60,6 +60,9 @@ The agent can send things back to you, not just talk:
 - `send_sticker(sticker_id, caption?)` — sends a Discord sticker (works in DMs and servers; bots don't need Nitro for stickers)
 - Queued items are sent with the reply: a single uncaptioned item is merged into the reply message, otherwise each item goes out as its own message with its caption.
 
+## Tagging (@mentions, model-decided)
+The bot can @mention (tag) people in its replies by writing `<@ID>` — Discord pings them. Each turn the prompt gets a short "Tagging" note with a **roster of real Discord ids**: everyone who has spoken in the current session (name + id, most recent first, max 20) plus anyone tagged in the triggering message. The note tells the model to use only roster ids (never invent them), to tag sparingly (answering someone directly, calling their attention, handing the conversation over), and to refer by name when the person isn't in the roster. The roster is rebuilt per turn and never persisted.
+
 ## Web tools (model-decided)
 - `web_search(query)` — SearXNG, returns 5 results (title + URL + snippet)
 - `fetch_url(url)` — readable text of the page (scripts/styles stripped, ~12 KB cap)
