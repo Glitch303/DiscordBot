@@ -229,7 +229,14 @@ class BotClient(discord.Client):
             # Persist the whole turn — tool calls included. Without the tool rows
             # the model can't see that it sends media by CALLING tools, and it
             # starts writing "there's your gif" in plain text instead.
-            self.store.append(session_id, ("user", parts), *[(m["role"], m) for m in new_msgs])
+            # Stamp user_id/sender on the user row — the mention roster is
+            # built from these, and mentioners otherwise never appear in it.
+            self.store.append(
+                session_id,
+                *([("user", parts)] + [(m["role"], m) for m in new_msgs]),
+                user_id=message.author.id,
+                sender=message.author.display_name,
+            )
             reply = next(
                 (m["text"] for m in reversed(new_msgs) if m["role"] == "assistant" and not m.get("tool_calls")),
                 None,
@@ -526,23 +533,40 @@ class BotClient(discord.Client):
         the model can @mention (tag) people by writing ``<@id>`` without
         inventing ids. Ephemeral: rebuilt each turn, never persisted.
         """
-        people: dict[int, str] = {}
-        for uid, name in self.store.sender_roster(session_id):
-            people[uid] = name
-        for m in message.mentions:
-            if m.id not in people:
-                people[m.id] = m.display_name
-        if not people:
+        roster = self.store.sender_roster(session_id)
+        if not roster and not message.mentions:
             return ""
-        roster = "\n".join(f"  {name} — {uid}" for uid, name in people.items())
+        people: dict[int, tuple[str, str | None]] = {}
+        for uid, name in roster:
+            if uid != self.user.id:
+                people[uid] = (name, None)
+        for m in message.mentions:
+            if m.bot or m.id == self.user.id:
+                continue
+            username = getattr(m, "name", None) or None
+            prev = people.get(m.id)
+            display = m.display_name
+            people[m.id] = (display, username if username and username != display else (prev[1] if prev else None))
+        if not people:
+            people_note = "  (empty — refer to people by name)"
+        else:
+            lines = []
+            for uid, (name, uname) in sorted(people.items(), key=lambda kv: (kv[1][0], kv[0])):
+                extra = f" (username: {uname})" if uname else ""
+                lines.append(f"  {name}{extra} — {uid}")
+            people_note = "\n".join(lines)
         return (
             "## Tagging (mentions)\n"
             "You can @mention (tag) people in your reply by writing <@ID> — it pings them. "
             "Use ONLY the exact ids from this roster; never invent, guess, or compute an id. "
+            "Match people loosely: the name you're given (nickname, username, display name) "
+            "may differ from the roster name but be the same person. "
             "Tag sparingly: to answer someone directly, call their attention, or hand the "
             "conversation to them. If the person isn't in the roster, refer to them by name "
-            "without a mention.\n"
-            f"Roster (name — Discord id):\n{roster}"
+            "without a mention — or ask.\n"
+            f"You are {self.user.display_name} (id {self.user.id}) — "
+            "tag yourself only if someone asks you to.\n"
+            f"Roster (name — Discord id):\n{people_note}"
         )
 
     def _chat_key(self, message: discord.Message) -> str:
