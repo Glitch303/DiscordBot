@@ -65,11 +65,30 @@ class BotClient(discord.Client):
     def _is_allowed(self, user: discord.abc.User) -> bool:
         return not self.cfg.allowed_users or user.id in self.cfg.allowed_users
 
+    def _is_allowed_bot(self, user: discord.abc.User) -> bool:
+        """Bot-message gate: allowed_bot_ids None = all bots, empty = no bots."""
+        return self.cfg.allowed_bot_ids is None or user.id in self.cfg.allowed_bot_ids
+
     async def on_message(self, message: discord.Message) -> None:
-        if message.author == self.user or message.author.bot:
+        # Every incoming message is logged (INFO) so "why didn't she reply?" is
+        # answerable from the journal alone: NO line here == the gateway never
+        # delivered the message at all (nothing in the code can hide it).
+        ch = message.channel
+        log.info(
+            "incoming %s from %s (id=%s bot=%s) in %s mentions=[%s] %r",
+            message.id, message.author, message.author.id,
+            getattr(message.author, "bot", None),
+            "DM" if isinstance(ch, discord.DMChannel) else getattr(ch, "name", ch.id),
+            ", ".join(f"{m.name}({m.id})" for m in message.mentions),
+            (message.content or "")[:100],
+        )
+        if message.author == self.user:
+            return
+        if message.author.bot and not self._is_allowed_bot(message.author):
+            log.info("dropped %s: bot %s not in DISCORD_ALLOWED_BOT_IDS", message.id, message.author.id)
             return
         if not self._is_allowed(message.author):
-            log.debug("ignoring message from non-allowed user %s", message.author.id)
+            log.info("dropped %s: user %s not in DISCORD_ALLOWED_USERS", message.id, message.author.id)
             return
 
         channel = message.channel
