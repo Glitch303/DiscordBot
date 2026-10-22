@@ -524,6 +524,7 @@ class SessionStore:
                 if label_senders and m["role"] == "user":
                     m = _label_user_message(m, r["sender"], r["user_id"])
                 out.append(m)
+        out = _dedupe_repeated_replies(out)
         # Don't start on an assistant/tool message (would confuse the API)
         while out and out[0]["role"] != "user":
             out = out[1:]
@@ -701,6 +702,31 @@ class SessionStore:
     def close(self) -> None:
         with self._lock:
             self._conn.close()
+
+
+def _dedupe_repeated_replies(out: list[dict]) -> list[dict]:
+    """Collapse runs of identical assistant replies, keeping the NEWEST one.
+
+    The model imitates patterns it sees in the window: once the bot falls into
+    a rut (e.g. answering "Saya tidak yakin." to five questions in a row), the
+    window keeps teaching it that repeating itself is what happens here, and
+    it repeats even on fresh turns. Dropping all but the latest duplicate
+    removes the run as soon as it forms, without touching what was persisted
+    (view-time only, like sender labels).
+    """
+    deduped: list[dict] = []
+    last_assistant: str | None = None
+    for m in reversed(out):  # newest first
+        t = None
+        if m["role"] == "assistant" and isinstance(m["content"], str) \
+                and not m.get("tool_calls"):
+            t = m["content"].strip()
+        if t is not None and t == last_assistant:
+            continue  # older copy of a run — keep the newer one
+        deduped.append(m)
+        if t is not None:
+            last_assistant = t
+    return list(reversed(deduped))
 
 
 def _label_user_message(m: dict, sender: str | None, user_id: int | None) -> dict:

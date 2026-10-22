@@ -137,8 +137,9 @@ class FakeMsg:
 
 def make_client(tmpdir: Path, mode: str) -> BotClient:
     cfg = Config(
-        discord_token="t", allowed_users=frozenset(), require_mention=True,
-        owner_id=None, model_base_url="http://localhost:1/v1", model_name="m",
+        discord_token="t", allowed_users=frozenset(), allowed_bot_ids=None,
+        require_mention=True, owner_id=None,
+        model_base_url="http://localhost:1/v1", model_name="m",
         model_api_key=None, searxng_url="http://localhost:1", giphy_api_key=None,
         klipy_api_key=None, gif_provider="auto", session_mode=mode,
         max_history_messages=10, max_attachment_bytes=1000, log_level="INFO",
