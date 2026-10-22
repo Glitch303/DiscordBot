@@ -497,7 +497,13 @@ class BotClient(discord.Client):
             "like you have been reading the channel — never act surprised by something "
             "someone said earlier in it. You only speak when you are @mentioned; your "
             "reply is for the person who mentioned you. Address people by name when it "
-            "clarifies who you mean."
+            "clarifies who you mean.\n"
+            "Pronouns point at the speaker, not at you: in [Name]'s message, first "
+            "person (saya, gue, gw, aku) is [Name] themselves — e.g. [Shyn]: 'gw autis' "
+            "means Shyn says THEY are autistic, it is not an accusation that you are. "
+            "Second person (kau, lo, kamu, elu) in a message that mentions you is you. "
+            "Reply to what is actually addressed to you; do not answer accusations "
+            "about yourself that were never made."
         )
         if not self.cfg.owner_id:
             return base + group
