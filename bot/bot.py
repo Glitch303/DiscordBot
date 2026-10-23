@@ -213,9 +213,13 @@ class BotClient(discord.Client):
                     user_content[0]["text"] = f"[{name}] " + user_content[0]["text"]
                 # Owner recognition only — no personality/face gating. SOUL.md is
                 # one persona for everyone and defines how the owner is treated.
-                if self.cfg.owner_id and message.author.id == self.cfg.owner_id:
-                    user_content.append({"type": "text", "text":
-                        f"(You are replying to {name} — your owner.)"})
+                if self.cfg.owner_id:
+                    if message.author.id == self.cfg.owner_id:
+                        user_content.append({"type": "text", "text":
+                            f"(You are replying to {name} — your owner. Private face.)"})
+                    else:
+                        user_content.append({"type": "text", "text":
+                            f"(You are replying to {name} — not your owner. Public face.)"})
                 note = self._mention_roster_note(session_id, message)
                 if note:
                     user_content.append({"type": "text", "text": note})
@@ -527,6 +531,8 @@ class BotClient(discord.Client):
         return base + group + (
             f"\n\n## Owner\n"
             f"Your owner is {owner}. Their mention tag is {owner_tag}: when you see "
+            "Wear your private face for them and your public face for everyone "
+            "else, per your persona — even mid-conversation."
             f"{owner_tag} in a message, that is {who} — your owner — NOT you. You "
             "recognise them whenever they speak; how you treat them is defined in your "
             "persona."
