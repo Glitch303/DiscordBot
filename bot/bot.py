@@ -480,7 +480,7 @@ class BotClient(discord.Client):
         Unlike DMs (where the prompt depends on who is talking), a channel has
         many speakers, so the prompt is identical for every turn: it explains
         the [Name] labels and states who the owner is. Facts only — the persona
-        (SOUL.md) is one personality for everyone and defines how the owner is
+        (SOUL.md) is defining the personality for everyone and defines how the owner and other users are
         treated; the per-turn note on the current message flags when the sender
         is the owner.
         """
@@ -508,16 +508,20 @@ class BotClient(discord.Client):
         owner_name = await self._owner_display_name()
         owner = (f"{owner_name} (Discord id {self.cfg.owner_id})"
                  if owner_name else f"the user with Discord id {self.cfg.owner_id}")
+        owner_tag = f"<@{self.cfg.owner_id}>"
+        who = owner_name or "your owner"
         return base + group + (
             f"\n\n## Owner\n"
-            f"Your owner is {owner}. You recognise them whenever they speak; "
-            "how you treat them is defined in your persona."
+            f"Your owner is {owner}. Their mention tag is {owner_tag}: when you see "
+            f"{owner_tag} in a message, that is {who} — your owner — NOT you. You "
+            "recognise them whenever they speak; how you treat them is defined in your "
+            "persona."
         )
 
     async def _system_prompt_for(self, user_id: int) -> str:
         """Per-user system prompt (DMs + per-user channels): base persona + owner fact.
 
-        SOUL.md is one persona for everyone; this only states who the owner is and
+        SOUL.md is multiple persona for each user; this states who the owner is and
         whether the current sender is them. The owner's NAME is included (not just
         'your owner') so the bot knows the owner's actual name and can answer
         'what's my name?' instead of falling back to the brother-name.
@@ -529,10 +533,10 @@ class BotClient(discord.Client):
         owner = (f"{owner_name} (Discord id {self.cfg.owner_id})"
                  if owner_name else f"the user with Discord id {self.cfg.owner_id}")
         if user_id == self.cfg.owner_id:
-            return base + f"\n\nThe person messaging you right now is your owner: {owner}."
+            return base + f"\n\nThe person messaging you right now is your owner: {owner}. Use Private Persona"
         return base + (
             f"\n\nYour owner is {owner}. "
-            "The person messaging you right now is not them."
+            "The person messaging you right now is not them. Use Public Persona"
         )
 
     def _mention_roster_note(self, session_id: str, message: discord.Message) -> str:
@@ -560,8 +564,10 @@ class BotClient(discord.Client):
             lines = []
             for uid, (name, uname) in sorted(people.items(), key=lambda kv: (kv[1][0], kv[0])):
                 extra = f" (username: {uname})" if uname else ""
-                lines.append(f"  {name}{extra} — {uid}")
+                owner_mark = " [YOUR OWNER]" if uid == self.cfg.owner_id else ""
+                lines.append(f"  {name}{owner_mark}{extra} — <@{uid}>")
             people_note = "\n".join(lines)
+        self_tag = f"<@{self.user.id}>"
         return (
             "## Tagging (mentions)\n"
             "You can @mention (tag) people in your reply by writing <@ID> — it pings them. "
@@ -571,9 +577,10 @@ class BotClient(discord.Client):
             "Tag sparingly: to answer someone directly, call their attention, or hand the "
             "conversation to them. If the person isn't in the roster, refer to them by name "
             "without a mention — or ask.\n"
-            f"You are {self.user.display_name} (id {self.user.id}) — "
-            "tag yourself only if someone asks you to.\n"
-            f"Roster (name — Discord id):\n{people_note}"
+            f"You are {self.user.display_name}. Your OWN mention tag is {self_tag}: "
+            f"when you see {self_tag} in a message, that is YOU — never anyone else. "
+            "Tag yourself only if someone asks you to.\n"
+            f"Roster (name — mention tag):\n{people_note}"
         )
 
     def _chat_key(self, message: discord.Message) -> str:
