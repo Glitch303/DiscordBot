@@ -6,9 +6,14 @@ import logging
 import time
 
 import httpx
+from typing import TYPE_CHECKING
 
 from . import media as media_mod
+from . import members as members_mod
 from . import youtube
+
+if TYPE_CHECKING:  # pragma: no cover
+    import discord
 
 log = logging.getLogger("bot.model")
 
@@ -162,9 +167,45 @@ MEDIA_TOOL_SCHEMAS = [
 ]
 
 
-def tools_for(media: media_mod.MediaContext | None) -> list[dict]:
-    """Base tools plus the media tools when a media context is available."""
-    return TOOL_SCHEMAS + (MEDIA_TOOL_SCHEMAS if media is not None else [])
+GUILD_TOOL_SCHEMAS = [
+    {
+        "type": "function",
+        "function": {
+            "name": "search_members",
+            "description": (
+                "Look up a member of this Discord server by (the start of) their name, "
+                "to get their exact mention tag. Use when you need to @mention (tag) "
+                "someone who is NOT in your tagging roster — e.g. the user asks you to "
+                "ping, call over, or hand the conversation to a server member. Matches "
+                "display names and usernames by prefix, case-insensitive. Returns lines "
+                "'display name (username) — <@id>' — tag the person by writing their "
+                "<@id> in your reply. Server channels only, not DMs."
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "name": {
+                        "type": "string",
+                        "description": "The (start of the) member's name — display name or username",
+                    },
+                },
+                "required": ["name"],
+            },
+        },
+    },
+]
+
+
+def tools_for(media: media_mod.MediaContext | None,
+              guild: "discord.Guild | None" = None) -> list[dict]:
+    """Base tools, plus the media tools (media context) and the member-lookup
+    tool (only in server channels, where a member list exists)."""
+    tools = list(TOOL_SCHEMAS)
+    if media is not None:
+        tools += MEDIA_TOOL_SCHEMAS
+    if guild is not None:
+        tools += GUILD_TOOL_SCHEMAS
+    return tools
 
 
 class ModelClient:
@@ -236,6 +277,8 @@ def run_agent(
     web: "Web",  # type: ignore[name-defined]
     messages: list[dict],
     media: "media_mod.MediaContext | None" = None,
+    guild: "discord.Guild | None" = None,
+    owner_id: int | None = None,
     max_tool_rounds: int = 4,
 ) -> list[dict]:
     """Agent loop: send messages, execute tool calls, repeat until a final text answer.
@@ -253,7 +296,7 @@ def run_agent(
     convo = list(messages)
     added: list[dict] = []
     for _ in range(max_tool_rounds + 1):
-        msg = model.chat(convo, tools=tools_for(media))
+        msg = model.chat(convo, tools=tools_for(media, guild))
         tool_calls = msg.get("tool_calls") or []
         if not tool_calls:
             text = (msg.get("content") or "").strip() or "(no response)"
@@ -281,6 +324,8 @@ def run_agent(
                 result = web.fetch(args.get("url", ""))
             elif name == "transcribe_youtube":
                 result = youtube.transcribe(args.get("url", ""), web)
+            elif name == "search_members":
+                result = members_mod.search_members(guild, args.get("name", ""), owner_id=owner_id)
             elif media is not None and name == "search_gifs":
                 result = media.tool_search_gifs(args.get("query", ""))
             elif media is not None and name == "send_file":

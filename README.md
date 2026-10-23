@@ -17,6 +17,7 @@ A **standalone** general-chat Discord bot in pure Python. No Hermes Agent, no fr
 | 🎬 Sends GIFs | `search_gifs` (Giphy and/or Klipy keys — see below) → `send_file` posts the .gif as an attachment |
 | 🏷️ Sends stickers | `search_stickers` (Discord's official 14 sticker packs + this server's stickers) → `send_sticker` |
 | 📤 Sends files | `send_file` sends any file back — a URL (auto-downloaded) or a file the user sent |
+| 📣 Tags people | `search_members` looks up any server member by name prefix from the full member cache and hands the model the exact `<@id>` to ping them; `@everyone`/`@role` in the output can never ping (outbound mention guard) |
 | 😄 Sticker chat | Stickers you send are read (name + pack + id) and can be bounced back |
 
 **Deliberately not included:** terminal access, code execution, file-system tools, browser automation. It's a chat bot — it reads the web, it sees what you send, it talks, and it sends GIFs, stickers, and files back.
@@ -39,6 +40,7 @@ bot/llm.py  (agent loop, max 4 tool rounds)
    ├── tool: transcribe_youtube → bot/youtube.py → youtube-transcript-api + keyless oEmbed (title/author)
    ├── tool: search_gifs / send_file → bot/media.py → Giphy/Klipy API + download to downloads/
    ├── tool: search_stickers / send_sticker → bot/media.py → Discord sticker packs (cached)
+   ├── tool: search_members → bot/members.py → full guild member cache (prefix scan, Server Members intent)
    └── chat completions  → bot/llm.py → MODEL_BASE_URL (OpenAI-compatible)
 
 bot/slash.py  native Discord slash commands (Hermes-style app commands):

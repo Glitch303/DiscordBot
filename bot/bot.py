@@ -24,7 +24,17 @@ class BotClient(discord.Client):
         intents = discord.Intents.default()
         intents.message_content = True
         intents.members = True
-        super().__init__(intents=intents)
+        # Outbound mention guard (hermes-agent style), applied to EVERY message
+        # the client sends: text containing @everyone/@here/@role renders but
+        # never pings — a stray "tag everyone" in the model's output or in
+        # echoed user content can't spam the whole server. <@id> user tags and
+        # the reply-reference chip still ping as usual.
+        super().__init__(
+            intents=intents,
+            allowed_mentions=discord.AllowedMentions(
+                everyone=False, roles=False, users=True, replied_user=True
+            ),
+        )
         self.cfg = cfg
         self.model = ModelClient(cfg.model_base_url, cfg.model_name, cfg.model_api_key)
         self.web = Web(cfg.searxng_url)
@@ -222,7 +232,11 @@ class BotClient(discord.Client):
             convo.append({"role": "user", "content": user_content})
 
             async with channel.typing():
-                new_msgs = await _to_thread(run_agent, self.model, self.web, convo, media_ctx)
+                # guild: enables the search_members tool (server channels only).
+                new_msgs = await _to_thread(
+                    run_agent, self.model, self.web, convo, media_ctx,
+                    guild, self.cfg.owner_id,
+                )
 
             # Persist the whole turn — tool calls included. Without the tool rows
             # the model can't see that it sends media by CALLING tools, and it
@@ -319,7 +333,7 @@ class BotClient(discord.Client):
 
         if cmd in ("help", "status"):
             return (
-                "**What I can do:** chat, web search, read links you send (YouTube links get transcribed for me), look at images, read text files, send GIFs/stickers/files back.\n"
+                "**What I can do:** chat, web search, read links you send (YouTube links get transcribed for me), look at images, read text files, send GIFs/stickers/files back, look up and tag server members by name.\n"
                 "`/new` — start a fresh conversation\n"
                 "`/title <name>` — name this conversation\n"
                 "`/sessions [search <q> | <name>]` — list this chat's conversations\n"
@@ -575,8 +589,9 @@ class BotClient(discord.Client):
             "Match people loosely: the name you're given (nickname, username, display name) "
             "may differ from the roster name but be the same person. "
             "Tag sparingly: to answer someone directly, call their attention, or hand the "
-            "conversation to them. If the person isn't in the roster, refer to them by name "
-            "without a mention — or ask.\n"
+            "conversation to them. If the person isn't in the roster, use the search_members "
+            "tool to look up their exact tag (server channels only) — or refer to them by "
+            "name without a mention.\n"
             f"You are {self.user.display_name}. Your OWN mention tag is {self_tag}: "
             f"when you see {self_tag} in a message, that is YOU — never anyone else. "
             "Tag yourself only if someone asks you to.\n"
