@@ -201,13 +201,11 @@ class BotClient(discord.Client):
                 user_content = [dict(p) for p in parts]
                 if user_content and user_content[0].get("type") == "text":
                     user_content[0]["text"] = f"[{name}] " + user_content[0]["text"]
-                if self.cfg.owner_id:
-                    if message.author.id == self.cfg.owner_id:
-                        user_content.append({"type": "text", "text":
-                            f"(You are replying to {name} — your owner. Private face.)"})
-                    else:
-                        user_content.append({"type": "text", "text":
-                            f"(You are replying to {name} — not your owner. Public face.)"})
+                # Owner recognition only — no personality/face gating. SOUL.md is
+                # one persona for everyone and defines how the owner is treated.
+                if self.cfg.owner_id and message.author.id == self.cfg.owner_id:
+                    user_content.append({"type": "text", "text":
+                        f"(You are replying to {name} — your owner.)"})
                 note = self._mention_roster_note(session_id, message)
                 if note:
                     user_content.append({"type": "text", "text": note})
@@ -481,10 +479,10 @@ class BotClient(discord.Client):
 
         Unlike DMs (where the prompt depends on who is talking), a channel has
         many speakers, so the prompt is identical for every turn: it explains
-        the [Name] labels and states who the owner is. Facts only — which face
-        the owner gets and which face everyone else gets is defined in the
-        persona (SOUL.md); the per-turn note on the current message says who
-        it's from.
+        the [Name] labels and states who the owner is. Facts only — the persona
+        (SOUL.md) is one personality for everyone and defines how the owner is
+        treated; the per-turn note on the current message flags when the sender
+        is the owner.
         """
         base = self.cfg.system_prompt
         group = (
@@ -512,25 +510,23 @@ class BotClient(discord.Client):
                  if owner_name else f"the user with Discord id {self.cfg.owner_id}")
         return base + group + (
             f"\n\n## Owner\n"
-            f"Your owner is {owner}.\n"
-            "Wear your private face for them and your public face for everyone "
-            "else, per your persona — even mid-conversation."
+            f"Your owner is {owner}. You recognise them whenever they speak; "
+            "how you treat them is defined in your persona."
         )
 
     def _system_prompt_for(self, user_id: int) -> str:
-        """Per-user system prompt: base persona + who this user is (facts only).
+        """Per-user system prompt: base persona + owner facts (no face gating).
 
-        The persona itself — including which face the owner gets and which face
-        everyone else gets — lives in SOUL.md, so nothing persona-specific is
-        injected here.
+        SOUL.md is a single persona for everyone; this only states who the owner
+        is and whether the current sender is them.
         """
         base = self.cfg.system_prompt
         if self.cfg.owner_id and user_id == self.cfg.owner_id:
-            return base + "\n\nThe person messaging you right now is your owner. Wear your private face, per your persona."
+            return base + "\n\nThe person messaging you right now is your owner."
         if self.cfg.owner_id:
             return base + (
-                f"\n\nThe person messaging you right now is NOT your owner "
-                f"Your owner is Discord id {self.cfg.owner_id}. Wear your public face, per your persona."
+                f"\n\nYour owner is Discord id {self.cfg.owner_id}. "
+                "The person messaging you right now is not them."
             )
         return base
 
