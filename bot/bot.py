@@ -210,7 +210,7 @@ class BotClient(discord.Client):
                 if note:
                     user_content.append({"type": "text", "text": note})
             else:
-                system = self._system_prompt_for(message.author.id)
+                system = await self._system_prompt_for(message.author.id)
                 # Copy: the roster note is appended below and must NOT be
                 # persisted with the turn (parts is what gets stored).
                 user_content = [dict(p) for p in parts]
@@ -514,21 +514,26 @@ class BotClient(discord.Client):
             "how you treat them is defined in your persona."
         )
 
-    def _system_prompt_for(self, user_id: int) -> str:
-        """Per-user system prompt: base persona + owner facts (no face gating).
+    async def _system_prompt_for(self, user_id: int) -> str:
+        """Per-user system prompt (DMs + per-user channels): base persona + owner fact.
 
-        SOUL.md is a single persona for everyone; this only states who the owner
-        is and whether the current sender is them.
+        SOUL.md is one persona for everyone; this only states who the owner is and
+        whether the current sender is them. The owner's NAME is included (not just
+        'your owner') so the bot knows the owner's actual name and can answer
+        'what's my name?' instead of falling back to the brother-name.
         """
         base = self.cfg.system_prompt
-        if self.cfg.owner_id and user_id == self.cfg.owner_id:
-            return base + "\n\nThe person messaging you right now is your owner."
-        if self.cfg.owner_id:
-            return base + (
-                f"\n\nYour owner is Discord id {self.cfg.owner_id}. "
-                "The person messaging you right now is not them."
-            )
-        return base
+        if not self.cfg.owner_id:
+            return base
+        owner_name = await self._owner_display_name()
+        owner = (f"{owner_name} (Discord id {self.cfg.owner_id})"
+                 if owner_name else f"the user with Discord id {self.cfg.owner_id}")
+        if user_id == self.cfg.owner_id:
+            return base + f"\n\nThe person messaging you right now is your owner: {owner}."
+        return base + (
+            f"\n\nYour owner is {owner}. "
+            "The person messaging you right now is not them."
+        )
 
     def _mention_roster_note(self, session_id: str, message: discord.Message) -> str:
         """Per-turn note listing the real Discord ids known in this session, so
