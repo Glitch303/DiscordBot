@@ -70,6 +70,13 @@ class Config:
     max_attachment_bytes: int
     log_level: str
 
+    # Memory (WhatsBot-style: rolling summary + persistent facts)
+    verbatim_turns: int  # recent user turns kept verbatim in context (VERBATIM_TURNS)
+    memory_cutoff_days: int  # prune stored messages older than this (MEMORY_CUTOFF_DAYS)
+    fact_cutoff_days: int  # prune unconfirmed facts older than this (FACT_CUTOFF_DAYS)
+    max_facts_in_context: int  # facts injected into the prompt (MAX_FACTS_IN_CONTEXT)
+    facts_db_path: Path = field(default_factory=lambda: ROOT / "data" / "facts.db")
+
     # Paths
     data_dir: Path = field(default_factory=lambda: ROOT / "data")
     downloads_dir: Path = field(default_factory=lambda: ROOT / "downloads")
@@ -116,4 +123,8 @@ def load() -> Config:
         max_history_messages=_int("MAX_HISTORY_MESSAGES", 30),
         max_attachment_bytes=_int("MAX_ATTACHMENT_BYTES", 25_000_000),
         log_level=os.environ.get("LOG_LEVEL", "INFO").upper(),
+        verbatim_turns=_int("VERBATIM_TURNS", 10),
+        memory_cutoff_days=_int("MEMORY_CUTOFF_DAYS", 30),
+        fact_cutoff_days=_int("FACT_CUTOFF_DAYS", 60),
+        max_facts_in_context=_int("MAX_FACTS_IN_CONTEXT", 8),
     )

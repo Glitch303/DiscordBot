@@ -12,6 +12,10 @@ additive.
     /sessions query:… list / search this chat's conversations
     /resume session:… resume an old conversation (autocomplete picker)
     /delete session:… delete a selected conversation
+    /memory           what I remember about this conversation and you
+    /facts            the durable facts I've stored about you
+    /forget fact_id:… delete a stored fact
+    /stats            sessions and message counts for this chat
     /status           service state + bot login + backend health
     /start /stop /restart   control the systemd user service
 """
@@ -215,6 +219,37 @@ def register(client):
         await interaction.response.send_message(content=_fit(f"🗑️ Deleted **{name}**." + extra), ephemeral=True)
 
     _attach_autocomplete(delete_cmd, "session", _session_autocomplete)
+
+    # ---- memory ------------------------------------------------------------------
+
+    @tree.command(name="memory", description="What I remember about this conversation and you")
+    async def memory_cmd(interaction: app_commands.Interaction) -> None:
+        if not client._is_allowed(interaction.user):
+            return await _deny(interaction)
+        reply = client._memory_command(_key(interaction), interaction.user.id)
+        await interaction.response.send_message(content=_fit(reply))
+
+    @tree.command(name="facts", description="The durable facts I've stored about you")
+    async def facts_cmd(interaction: app_commands.Interaction) -> None:
+        if not client._is_allowed(interaction.user):
+            return await _deny(interaction)
+        reply = client._facts_command(interaction.user.id)
+        await interaction.response.send_message(content=_fit(reply))
+
+    @tree.command(name="forget", description="Delete a stored fact (id from /facts)")
+    @app_commands.describe(fact_id="Fact id shown by /facts")
+    async def forget_cmd(interaction: app_commands.Interaction, fact_id: str) -> None:
+        if not client._is_allowed(interaction.user):
+            return await _deny(interaction)
+        reply = client._forget_command(fact_id)
+        await interaction.response.send_message(content=_fit(reply), ephemeral=True)
+
+    @tree.command(name="stats", description="Sessions and message counts for this chat")
+    async def stats_cmd(interaction: app_commands.Interaction) -> None:
+        if not client._is_allowed(interaction.user):
+            return await _deny(interaction)
+        reply = client._stats_command(_key(interaction), interaction.user.id)
+        await interaction.response.send_message(content=_fit(reply))
 
     # ---- session mode --------------------------------------------------------------
 

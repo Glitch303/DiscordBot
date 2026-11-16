@@ -97,6 +97,12 @@ CREATE TABLE IF NOT EXISTS chat_sessions (
     session_key TEXT PRIMARY KEY,
     session_id TEXT NOT NULL REFERENCES sessions(id)
 );
+
+CREATE TABLE IF NOT EXISTS summaries (
+    session_id TEXT PRIMARY KEY REFERENCES sessions(id),
+    summary_text TEXT NOT NULL,
+    last_summarized_timestamp REAL NOT NULL
+);
 """
 
 PREVIEW_CHARS = 60
@@ -131,6 +137,25 @@ def _content_from_json(raw: str):
             return data["parts"]
         return data.get("text", raw)
     return data
+
+
+def _content_to_text(raw: str) -> str:
+    """Plain text of a stored content cell (for summarization, previews).
+
+    Text parts are joined; non-text parts (images, etc.) are skipped.
+    """
+    data = _content_from_json(raw)
+    if isinstance(data, str):
+        return data
+    if isinstance(data, list):
+        parts = []
+        for p in data:
+            if isinstance(p, dict) and p.get("type") == "text" and p.get("text"):
+                parts.append(p["text"])
+        return " ".join(parts)
+    if isinstance(data, dict):
+        return data.get("text") or ""
+    return str(data)
 
 
 def _row_to_api_message(role: str, raw: str) -> dict | None:
@@ -466,11 +491,13 @@ class SessionStore:
     # ---- messages -----------------------------------------------------------
 
     def append(self, session_id: str, *messages: tuple[str, object],
-               user_id: int | None = None, sender: str | None = None) -> None:
+               user_id: int | None = None, sender: str | None = None,
+               timestamp: float | None = None) -> None:
         """Append rows to a session. ``user_id``/``sender`` stamp the USER rows
         (assistant/tool rows are left unattributed) so shared channel history
-        can say who said what."""
-        now = _now()
+        can say who said what. ``timestamp`` overrides the row time
+        (defaults to now)."""
+        now = timestamp if timestamp is not None else _now()
         with self._lock:
             for role, content in messages:
                 uid = user_id if role == "user" else None
@@ -601,6 +628,7 @@ class SessionStore:
             if not row:
                 return None
             self._conn.execute("DELETE FROM messages WHERE session_id = ?", (session_id,))
+            self._conn.execute("DELETE FROM summaries WHERE session_id = ?", (session_id,))
             self._conn.execute("DELETE FROM sessions WHERE id = ?", (session_id,))
             # Children lose their lineage pointer (no FK on parent_session_id,
             # but don't leave dangling references around).
@@ -653,6 +681,124 @@ class SessionStore:
                 (session_id,),
             ).fetchone()
         return row["c"]
+
+    def session_info(self, session_id: str) -> dict | None:
+        """Session row as a dict (id, title, message_count, started_at,
+        last_activity_at), or None if unknown."""
+        with self._lock:
+            row = self._conn.execute(
+                "SELECT id, title, message_count, started_at, last_activity_at "
+                "FROM sessions WHERE id = ?",
+                (session_id,),
+            ).fetchone()
+        return dict(row) if row else None
+
+    def stats_for_key(self, session_key: str) -> dict:
+        """Total sessions and stored messages for one chat key."""
+        with self._lock:
+            s = self._conn.execute(
+                "SELECT COUNT(*) AS c FROM sessions WHERE session_key = ?",
+                (session_key,),
+            ).fetchone()
+            m = self._conn.execute(
+                "SELECT COUNT(*) AS c FROM messages WHERE session_id IN "
+                "(SELECT id FROM sessions WHERE session_key = ?)",
+                (session_key,),
+            ).fetchone()
+        return {"sessions": s["c"], "messages": m["c"]}
+
+    # ---- memory: rolling summary + pruning (WhatsBot-style) -----------------
+
+    def messages_since(self, session_id: str, since_timestamp: float) -> list[tuple[str, float, str]]:
+        """Plain-text messages newer than since_timestamp, oldest first.
+
+        Returns [(content, timestamp, role)].
+        """
+        with self._lock:
+            rows = self._conn.execute(
+                "SELECT content, timestamp, role FROM messages "
+                "WHERE session_id = ? AND timestamp > ? ORDER BY timestamp ASC",
+                (session_id, since_timestamp),
+            ).fetchall()
+        return [(_content_to_text(r["content"]), r["timestamp"], r["role"]) for r in rows]
+
+    def oldest_tail_timestamp(self, session_id: str, max_messages: int) -> float | None:
+        """Timestamp of the start of the verbatim-tail window.
+
+        The tail is the newest ``max_messages`` USER turns (and everything
+        after the first of them). Returns the timestamp of that first tail
+        message, or ``None`` when the session has no user messages.
+        """
+        with self._lock:
+            ids = [
+                r["id"]
+                for r in self._conn.execute(
+                    "SELECT id FROM messages WHERE session_id = ? AND role = 'user' "
+                    "ORDER BY id DESC LIMIT ?",
+                    (session_id, max_messages),
+                ).fetchall()
+            ]
+            if not ids:
+                return None
+            row = self._conn.execute(
+                "SELECT MIN(timestamp) AS ts FROM messages WHERE session_id = ? AND id >= ?",
+                (session_id, min(ids)),
+            ).fetchone()
+        return row["ts"]
+
+    def prune_old_messages(self, session_id: str | None = None,
+                           cutoff_days: int = 30) -> int:
+        """Delete messages older than cutoff_days (one session, or all).
+
+        Recomputes every session's message_count afterwards. Returns rowcount.
+        """
+        cutoff = time.time() - cutoff_days * 86400
+        with self._lock:
+            if session_id is not None:
+                cur = self._conn.execute(
+                    "DELETE FROM messages WHERE session_id = ? AND timestamp < ?",
+                    (session_id, cutoff),
+                )
+            else:
+                cur = self._conn.execute(
+                    "DELETE FROM messages WHERE timestamp < ?", (cutoff,)
+                )
+            self._conn.execute(
+                "UPDATE sessions SET message_count = "
+                "(SELECT COUNT(*) FROM messages m WHERE m.session_id = sessions.id)"
+            )
+            self._conn.commit()
+        return cur.rowcount
+
+    def save_summary(self, session_id: str, summary_text: str,
+                     last_summarized_timestamp: float) -> None:
+        """Upsert the rolling summary for a session."""
+        with self._lock:
+            self._conn.execute(
+                "INSERT INTO summaries (session_id, summary_text, last_summarized_timestamp) "
+                "VALUES (?, ?, ?) "
+                "ON CONFLICT(session_id) DO UPDATE SET "
+                "summary_text = excluded.summary_text, "
+                "last_summarized_timestamp = excluded.last_summarized_timestamp",
+                (session_id, summary_text, last_summarized_timestamp),
+            )
+            self._conn.commit()
+
+    def get_summary(self, session_id: str) -> tuple[str | None, float | None]:
+        """(summary_text, last_summarized_timestamp) or (None, None)."""
+        with self._lock:
+            row = self._conn.execute(
+                "SELECT summary_text, last_summarized_timestamp FROM summaries WHERE session_id = ?",
+                (session_id,),
+            ).fetchone()
+        if not row:
+            return None, None
+        return row["summary_text"], row["last_summarized_timestamp"]
+
+    def clear_summary(self, session_id: str) -> None:
+        with self._lock:
+            self._conn.execute("DELETE FROM summaries WHERE session_id = ?", (session_id,))
+            self._conn.commit()
 
     def search_sessions(self, session_key: str, query: str) -> list[dict]:
         like = f"%{query}%"

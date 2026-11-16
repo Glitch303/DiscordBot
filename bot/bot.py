@@ -5,14 +5,25 @@ import asyncio
 import logging
 import re
 import tempfile
+import threading
+import time
 from pathlib import Path
 
 import discord
 
 from .attachments import describe_attachments, describe_stickers, extract_urls
 from .config import Config
+from .facts import FactsStore
 from .llm import ModelClient, run_agent
 from .media import MediaContext, MediaSend
+from .memory import (
+    extract_facts,
+    facts_text,
+    start_cleanup_thread,
+    summarize_session,
+    summary_text,
+    user_text_from_parts,
+)
 from . import slash, youtube
 from .store import SessionStore
 from .web import Web
@@ -39,6 +50,8 @@ class BotClient(discord.Client):
         self.model = ModelClient(cfg.model_base_url, cfg.model_name, cfg.model_api_key)
         self.web = Web(cfg.searxng_url)
         self.store = SessionStore(cfg.data_dir, mode=cfg.session_mode)
+        self.facts = FactsStore(cfg.facts_db_path)
+        self._summarizing: set[str] = set()  # sessions with a summary update in flight
         self._busy: set[str] = set()
         self._owner_name: str | None = None  # cached owner display name (owner facts go into the prompts)
         self.tree = slash.register(self)  # Discord app commands (Hermes-style)
@@ -63,11 +76,16 @@ class BotClient(discord.Client):
         # guild-scoped copies as well makes Discord show each command TWICE in the
         # picker (global + guild entry). Trade-off: definition changes take up to
         # an hour to propagate to servers (old definitions keep working meanwhile).
+        start_cleanup_thread(
+            self.store, self.facts,
+            self.cfg.memory_cutoff_days, self.cfg.fact_cutoff_days,
+        )
 
     async def close(self) -> None:
         self.model.close()
         self.web.close()
         self.store.close()
+        self.facts.close()
         await super().close()
 
     # ---- message handling -------------------------------------------------
@@ -204,7 +222,7 @@ class BotClient(discord.Client):
                 session_id, self.cfg.max_history_messages, label_senders=shared_channel
             )
             if shared_channel:
-                system = await self._channel_system_prompt()
+                system = await self._channel_system_prompt(session_id)
                 name = message.author.display_name
                 # Label the current turn too. Labels come from the stored sender
                 # at read time, so the PERSISTED parts stay unlabelled (copy).
@@ -220,11 +238,17 @@ class BotClient(discord.Client):
                     else:
                         user_content.append({"type": "text", "text":
                             f"(You are replying to {name} — not your owner. Public face.)"})
+                # Durable facts about THIS speaker (the channel system prompt is
+                # shared, so per-user memory rides on the turn, like the roster).
+                facts = facts_text(self.facts, str(message.author.id),
+                                   self.cfg.max_facts_in_context)
+                if facts:
+                    user_content.append({"type": "text", "text": facts})
                 note = self._mention_roster_note(session_id, message)
                 if note:
                     user_content.append({"type": "text", "text": note})
             else:
-                system = await self._system_prompt_for(message.author.id)
+                system = await self._system_prompt_for(message.author.id, session_id)
                 # Copy: the roster note is appended below and must NOT be
                 # persisted with the turn (parts is what gets stored).
                 user_content = [dict(p) for p in parts]
@@ -258,6 +282,11 @@ class BotClient(discord.Client):
                 None,
             ) or "(no response)"
             await self._reply_with_media(message, reply, media_ctx.sends)
+
+            # Memory upkeep runs AFTER the reply so it never adds to reply
+            # latency: rolling summary (when the verbatim tail is full) and
+            # fact extraction from this user's message.
+            self._schedule_memory_work(session_id, message.author.id, parts)
         except Exception:
             log.exception("error handling message %s", message.id)
             try:
@@ -323,6 +352,47 @@ class BotClient(discord.Client):
             except discord.DiscordException:
                 log.exception("failed to send media item")
 
+    # ---- memory upkeep (background, post-reply) -----------------------------
+
+    def _schedule_memory_work(self, session_id: str, user_id: int, parts: list) -> None:
+        """Kick off background memory work for a stored turn.
+
+        - rolling summary: only when the session has grown past the verbatim
+          tail (``VERBATIM_TURNS`` user turns); one update in flight per
+          session (guarded by ``_summarizing``);
+        - fact extraction: from the user's text of this turn.
+
+        Never raises into the caller; failures are logged.
+        """
+        uid = str(user_id)
+        text = user_text_from_parts(parts)
+
+        def _summarize() -> None:
+            if session_id in self._summarizing:
+                return
+            self._summarizing.add(session_id)
+            try:
+                if self.store.user_message_count(session_id) > self.cfg.verbatim_turns:
+                    summarize_session(
+                        self.store, self.model, session_id, self.cfg.verbatim_turns
+                    )
+            except Exception:
+                log.exception("summary update failed for session %s", session_id)
+            finally:
+                self._summarizing.discard(session_id)
+
+        def _extract() -> None:
+            try:
+                n = extract_facts(self.facts, self.model, uid, text)
+                if n:
+                    log.info("stored %d fact(s) for user %s", n, uid)
+            except Exception:
+                log.exception("fact extraction failed for user %s", uid)
+
+        threading.Thread(target=_summarize, name=f"summarize-{session_id}", daemon=True).start()
+        if text:
+            threading.Thread(target=_extract, name=f"facts-{uid}", daemon=True).start()
+
     def _handle_command(self, message: discord.Message, text: str, is_dm: bool) -> str | None:
         """Process /commands. Returns the reply text, or None if not a command."""
         m = re.match(r"^/([a-zA-Z]+)(?:\s+(.*?))?\s*$", text, re.DOTALL)
@@ -337,13 +407,17 @@ class BotClient(discord.Client):
 
         if cmd in ("help", "status"):
             return (
-                "**What I can do:** chat, web search, read links you send (YouTube links get transcribed for me), look at images, read text files, send GIFs/stickers/files back, look up and tag server members by name.\n"
+                "**What I can do:** chat, web search, read links you send (YouTube links get transcribed for me), look at images, read text files, send GIFs/stickers/files back, look up and tag server members by name. I also remember things: I keep a rolling summary of each conversation and store durable facts you tell me.\n"
                 "`/new` — start a fresh conversation\n"
                 "`/title <name>` — name this conversation\n"
                 "`/sessions [search <q> | <name>]` — list this chat's conversations\n"
                 "`/resume [number | name]` — menu, or jump back to an old conversation\n"
+                "`/memory` — what I remember about this conversation and you\n"
+                "`/facts` — the durable facts I've stored about you\n"
+                "`/forget <fact id>` — delete one fact (ids from `/facts`)\n"
+                "`/stats` — sessions and message counts for this chat\n"
                 "`/help` — this message\n"
-                "Also in Discord's slash menu (type `/`): `/new` `/title` `/sessions` `/resume` `/delete` with an autocomplete session picker, `/session-mode` to switch between shared and per-user session modes, plus `/status` `/start` `/stop` `/restart` for service control."
+                "Also in Discord's slash menu (type `/`): `/new` `/title` `/sessions` `/resume` `/delete` with an autocomplete session picker, `/memory` `/facts` `/forget` `/stats`, `/session-mode` to switch between shared and per-user session modes, plus `/status` `/start` `/stop` `/restart` for service control."
                 + ("" if is_dm else "\nMention me (@me) to get my attention in this channel.")
             )
 
@@ -355,6 +429,18 @@ class BotClient(discord.Client):
 
         if cmd == "resume":
             return self._resume_command(chat_key, arg, message.author.id)
+
+        if cmd == "memory":
+            return self._memory_command(chat_key, message.author.id)
+
+        if cmd == "facts":
+            return self._facts_command(message.author.id)
+
+        if cmd == "forget":
+            return self._forget_command(arg)
+
+        if cmd == "stats":
+            return self._stats_command(chat_key, message.author.id)
 
         return None
 
@@ -436,6 +522,55 @@ class BotClient(discord.Client):
         unit = "message" if count == 1 else "messages"
         return f"↻ Resumed session **{name}** ({count} {unit}). Conversation restored."
 
+    # ---- memory commands ------------------------------------------------------
+
+    def _memory_command(self, chat_key: str, user_id: int) -> str:
+        """What I remember about this conversation and you."""
+        session_id = self.store.current_session_id(chat_key)
+        info = self.store.session_info(session_id) if session_id else None
+        if not info:
+            return "No session here yet — say something first."
+        started = time.strftime("%Y-%m-%d %H:%M", time.localtime(info["started_at"]))
+        active = time.strftime("%Y-%m-%d %H:%M", time.localtime(info["last_activity_at"]))
+        summary, _ts = self.store.get_summary(session_id)
+        summary_len = len(summary) if summary else 0
+        facts_n = self.facts.get_fact_count(str(user_id))
+        lines = [
+            "🧠 **Memory for this chat**",
+            f"Session: `{info['id']}` — {info['message_count']} messages stored",
+            f"Started: {started} · Last active: {active}",
+            f"Rolling summary: {'none yet' if summary_len == 0 else str(summary_len) + ' chars'}",
+            f"Durable facts about you: {facts_n}",
+        ]
+        return "\n".join(lines)
+
+    def _facts_command(self, user_id: int) -> str:
+        """List the durable facts stored about this user."""
+        rows = self.facts.get_facts(str(user_id), 20)
+        if not rows:
+            return "No facts stored about you yet. Tell me things and I'll remember them."
+        lines = ["📇 **Facts about you**", ""]
+        for fid, fact, entity, _conf, _created, _confirmed in rows:
+            lines.append(f"[{fid}] ({entity}) {fact}")
+        lines += ["", "Forget one: `/forget <id>`"]
+        return "\n".join(lines)
+
+    def _forget_command(self, arg: str) -> str:
+        if not arg.isdigit():
+            return "Usage: `/forget <fact id>` — see `/facts` for the list."
+        if self.facts.delete_fact(int(arg)):
+            return f"Fact [{arg}] deleted."
+        return f"Fact [{arg}] not found."
+
+    def _stats_command(self, chat_key: str, user_id: int) -> str:
+        st = self.store.stats_for_key(chat_key)
+        facts_n = self.facts.get_fact_count(str(user_id))
+        return "\n".join([
+            "📊 **Stats for this chat**",
+            f"Sessions: {st['sessions']} · Stored messages: {st['messages']}",
+            f"Durable facts about you: {facts_n}",
+        ])
+
     def _format_session_listing(self, rows: list[dict], title: str) -> str:
         lines = [f"📋 **{title}**", ""]
         for i, r in enumerate(rows, 1):
@@ -473,6 +608,10 @@ class BotClient(discord.Client):
                 user_id=message.author.id,
                 sender=message.author.display_name,
             )
+            # Unmentioned messages still count as things the user said — run
+            # fact extraction on them too (background, no model reply).
+            self._schedule_memory_work(session_id, message.author.id,
+                                       [{"type": "text", "text": stripped}])
         except Exception:
             log.exception("failed to record context message %s", message.id)
 
@@ -492,7 +631,12 @@ class BotClient(discord.Client):
         self._owner_name = user.display_name
         return self._owner_name
 
-    async def _channel_system_prompt(self) -> str:
+    def _summary_section(self, session_id: str) -> str:
+        """The session's rolling summary for the prompt. '' if none yet."""
+        s = summary_text(self.store, session_id)
+        return ("\n\n" + s) if s else ""
+
+    async def _channel_system_prompt(self, session_id: str) -> str:
         """Stable system prompt for SHARED channel sessions.
 
         Unlike DMs (where the prompt depends on who is talking), a channel has
@@ -500,7 +644,9 @@ class BotClient(discord.Client):
         the [Name] labels and states who the owner is. Facts only — the persona
         (SOUL.md) is defining the personality for everyone and defines how the owner and other users are
         treated; the per-turn note on the current message flags when the sender
-        is the owner.
+        is the owner. Per-user facts ride on the turn (see on_message); the
+        session's rolling summary is appended here (it's per-session, not
+        per-user).
         """
         base = self.cfg.system_prompt
         group = (
@@ -522,7 +668,7 @@ class BotClient(discord.Client):
             "about yourself that were never made."
         )
         if not self.cfg.owner_id:
-            return base + group
+            return base + group + self._summary_section(session_id)
         owner_name = await self._owner_display_name()
         owner = (f"{owner_name} (Discord id {self.cfg.owner_id})"
                  if owner_name else f"the user with Discord id {self.cfg.owner_id}")
@@ -536,10 +682,11 @@ class BotClient(discord.Client):
             f"{owner_tag} in a message, that is {who} — your owner — NOT you. You "
             "recognise them whenever they speak; how you treat them is defined in your "
             "persona."
-        )
+        ) + self._summary_section(session_id)
 
-    async def _system_prompt_for(self, user_id: int) -> str:
-        """Per-user system prompt (DMs + per-user channels): base persona + owner fact.
+    async def _system_prompt_for(self, user_id: int, session_id: str) -> str:
+        """Per-user system prompt (DMs + per-user channels): base persona +
+        owner fact + this user's durable facts + the session's rolling summary.
 
         SOUL.md is multiple persona for each user; this states who the owner is and
         whether the current sender is them. The owner's NAME is included (not just
@@ -547,17 +694,22 @@ class BotClient(discord.Client):
         'what's my name?' instead of falling back to the brother-name.
         """
         base = self.cfg.system_prompt
-        if not self.cfg.owner_id:
-            return base
-        owner_name = await self._owner_display_name()
-        owner = (f"{owner_name} (Discord id {self.cfg.owner_id})"
-                 if owner_name else f"the user with Discord id {self.cfg.owner_id}")
-        if user_id == self.cfg.owner_id:
-            return base + f"\n\nThe person messaging you right now is your owner: {owner}. Use Private Persona"
-        return base + (
-            f"\n\nYour owner is {owner}. "
-            "The person messaging you right now is not them. Use Public Persona"
-        )
+        if self.cfg.owner_id:
+            owner_name = await self._owner_display_name()
+            owner = (f"{owner_name} (Discord id {self.cfg.owner_id})"
+                     if owner_name else f"the user with Discord id {self.cfg.owner_id}")
+            if user_id == self.cfg.owner_id:
+                base += f"\n\nThe person messaging you right now is your owner: {owner}. Use Private Persona"
+            else:
+                base += (
+                    f"\n\nYour owner is {owner}. "
+                    "The person messaging you right now is not them. Use Public Persona"
+                )
+        facts = facts_text(self.facts, str(user_id), self.cfg.max_facts_in_context)
+        if facts:
+            base += "\n\n" + facts
+        base += self._summary_section(session_id)
+        return base
 
     def _mention_roster_note(self, session_id: str, message: discord.Message) -> str:
         """Per-turn note listing the real Discord ids known in this session, so

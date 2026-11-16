@@ -35,6 +35,20 @@ Set `REQUIRE_MENTION=0` to have it answer every message in every channel it can 
   - Naming a session (`/title <name>`) is still the clean way to make it findable by name.
 - **Discord slash commands (Hermes-style app commands, `bot/slash.py`):** the same commands are registered as native application commands (type `/` in the app) with typed options and an **autocomplete session picker** on `/resume` and `/delete`. Interactions route into the same handlers as the text commands, which keep working unchanged. `/delete session:…` is slash-only: it removes the picked session (and all its messages); if it was the chat's current session, a fresh one is started so the chat keeps working. `/status` shows service + bot + backend health; `/start` `/stop` `/restart` control the systemd user service (stop/restart reply first, then act, so the message lands before the process goes down). Global sync covers DMs (can take up to an hour to propagate); each server gets instant guild-scoped copies on startup.
 
+## Memory (WhatsBot-style)
+On top of sessions, the bot keeps two tiers of memory (ported from WhatsBot):
+
+- **Rolling summary** — when a session has more than `VERBATIM_TURNS` user turns (default 10), the turns that fall *outside* the most-recent-10 window are compressed into a compact summary (≤200 words, same language as the conversation). The summary is merged incrementally — each update folds new messages into the previous summary — and injected into the system prompt as `[CONVERSATION SUMMARY]`. The recent tail stays verbatim in context, so nothing is lost at the cost of tokens.
+- **Durable facts** — every user message (replied *or* recorded as context) is scanned in the background for specific, durable facts about the user or people they mention (names, preferences, plans, relationships, habits — not opinions or small talk). Facts are stored per user in `data/facts.db` with an entity and a confidence, deduplicated on exact text (re-stated facts bump `last_confirmed` and keep the higher confidence), and injected into the prompt as `[FACTS about this user]` (up to `MAX_FACTS_IN_CONTEXT`, most recently confirmed first). In shared channels the facts ride on the turn (the channel system prompt is shared); in DMs/per-user mode they go in the per-user system prompt.
+
+Both run **after** the reply, in background threads — they never add to reply latency, and a model failure in either just gets logged. A cleanup thread prunes every 6 hours: stored messages older than `MEMORY_CUTOFF_DAYS` (default 30) and facts not re-confirmed within `FACT_CUTOFF_DAYS` (default 60).
+
+**Commands** (text and slash):
+- `/memory` — what the bot remembers about this conversation and you (session stats, summary size, fact count)
+- `/facts` — list the durable facts stored about you, with ids
+- `/forget <id>` — delete one fact (id from `/facts`)
+- `/stats` — session and message counts for this chat + your fact count
+
 ## Links
 Bare URLs in a message (up to 3) are **auto-fetched** and handed to the model as context, so "what's this about?" + a link works without extra tool calls. The model can also fetch more via `fetch_url` itself.
 
