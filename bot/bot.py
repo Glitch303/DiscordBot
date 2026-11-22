@@ -589,9 +589,10 @@ class BotClient(discord.Client):
     def _record_context(self, message: discord.Message) -> None:
         """Record an unmentioned message in the shared channel session.
 
-        The bot only *speaks* on mention, but it should *know* what happened in
-        the channel in between — these labelled rows are context for the next
-        real turn (no model call here, so it's cheap).
+        Channel gating: only records if a session already exists for this
+        channel (i.e., the bot was mentioned or spoke here before). Channels
+        the bot has never interacted with don't get sessions created for them.
+        Ignored channels (IGNORED_CHANNELS env var) are never recorded.
         """
         stripped = (message.content or "").strip()
         if not stripped:
@@ -600,8 +601,18 @@ class BotClient(discord.Client):
                 return
             stripped = f"(sent {n} attachment{'s' if n > 1 else ''})"
         chat_key = self._chat_key(message)
+
+        # Channel gating: check if channel is ignored
+        channel_id = message.channel.id
+        if channel_id in self.cfg.ignored_channels:
+            return  # Channel is ignored
+
+        # Channel gating: only record context if a session already exists
+        session_id = self.store.current_session_id(chat_key)
+        if not session_id:
+            return  # No session yet — bot hasn't been mentioned/spoken here
+
         try:
-            session_id = self.store.ensure_session(chat_key, message.author.id)
             self.store.append(
                 session_id,
                 ("user", stripped),

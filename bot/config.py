@@ -77,6 +77,9 @@ class Config:
     max_facts_in_context: int  # facts injected into the prompt (MAX_FACTS_IN_CONTEXT)
     facts_db_path: Path = field(default_factory=lambda: ROOT / "data" / "facts.db")
 
+    # Channel gating: channels to ignore (no session creation)
+    ignored_channels: frozenset[int] = field(default_factory=frozenset)
+
     # Paths
     data_dir: Path = field(default_factory=lambda: ROOT / "data")
     downloads_dir: Path = field(default_factory=lambda: ROOT / "downloads")
@@ -106,6 +109,10 @@ def load() -> Config:
             int(x) for x in bots_raw.split(",") if x.strip().isdigit()
         )
     owner_raw = os.environ.get("OWNER_ID", "").strip()
+    ignored_raw = os.environ.get("IGNORED_CHANNELS", "").strip()
+    ignored = frozenset(
+        int(x) for x in ignored_raw.split(",") if x.strip().isdigit()
+    ) if ignored_raw else frozenset()
     return Config(
         discord_token=os.environ["DISCORD_BOT_TOKEN"],
         allowed_users=allowed,
@@ -127,4 +134,5 @@ def load() -> Config:
         memory_cutoff_days=_int("MEMORY_CUTOFF_DAYS", 30),
         fact_cutoff_days=_int("FACT_CUTOFF_DAYS", 60),
         max_facts_in_context=_int("MAX_FACTS_IN_CONTEXT", 8),
+        ignored_channels=ignored,
     )

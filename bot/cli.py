@@ -166,8 +166,12 @@ def _health_lines() -> list[str]:
 
     base = vals.get("MODEL_BASE_URL", "http://localhost:27906/v1").rstrip("/")
     model = vals.get("MODEL_NAME", "")
+    api_key = vals.get("MODEL_API_KEY", "")
+    headers = {}
+    if api_key:
+        headers["Authorization"] = f"Bearer {api_key}"
     try:
-        r = httpx.get(f"{base}/models", timeout=5)
+        r = httpx.get(f"{base}/models", headers=headers, timeout=5)
         r.raise_for_status()
         ids = [m.get("id") for m in r.json().get("data", [])]
         mark = "ready" if model in ids else f"model '{model}' not in list"
@@ -396,6 +400,16 @@ def cmd_config(args: argparse.Namespace) -> int:
     return 0
 
 
+def cmd_menu(_: argparse.Namespace) -> int:
+    """Launch the interactive WhatsBot-style menu."""
+    from .menu import run
+    try:
+        run()
+    except KeyboardInterrupt:
+        pass
+    return 0
+
+
 # ---- entry point -------------------------------------------------------------------
 
 def build_parser() -> argparse.ArgumentParser:
@@ -442,6 +456,9 @@ def build_parser() -> argparse.ArgumentParser:
     sp.add_argument("key", nargs="?", default=None, help="variable name")
     sp.add_argument("value", nargs="?", default=None, help="new value (to set)")
     sp.set_defaults(fn=cmd_config)
+
+    sp = sub.add_parser("menu", help="interactive WhatsBot-style menu")
+    sp.set_defaults(fn=cmd_menu)
 
     return p
 

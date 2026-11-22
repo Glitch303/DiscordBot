@@ -118,6 +118,7 @@ ln -sf "$PWD/bin/discordbot" ~/.local/bin/discordbot
 | `discordbot sessions [search <q>]` | search sessions by title or message content |
 | `discordbot session-mode [shared\|per_user]` | show or switch session mode (shared = one session per channel, per_user = one per user); switching writes `.env` + restarts |
 | `discordbot config [KEY] [VALUE]` | list, read, or set `.env` values (tokens masked) |
+| `discordbot menu` | interactive WhatsBot-style terminal menu (settings, sessions, start/stop bot, logs, etc.) |
 
 ## Creating the Discord bot
 
